@@ -1,0 +1,9 @@
+numpy
+scipy
+polars
+tqdm
+matplotlib
+torch
+mlflow
+scikit-learn
+nvidia-ml-py

@@ -1,0 +1,6 @@
+.venv
+data
+plots
+mlruns
+mlflow.db
+.mlflow_artifact_staging
