@@ -1,6 +1,5 @@
 .venv
+.ipynb_checkpoints
 data
 plots
-mlruns
-mlflow.db
-.mlflow_artifact_staging
+mlflow

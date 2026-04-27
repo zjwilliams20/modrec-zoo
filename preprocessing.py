@@ -1,10 +1,17 @@
-from typing import Dict, Tuple
+from pathlib import Path
+from typing import Dict, List, Tuple
 
 import numpy as np
 import polars as pl
 import scipy.signal as signal
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
+
+from models import representation_for_model
+from simulator import load_dataset
+
+
+README_MODULATION_ORDER = ("2PSK", "4PSK", "8PSK", "pi/4-DQPSK", "16QAM", "64QAM", "256QAM", "MSK")
 
 
 class ModrecDataset(Dataset):
@@ -53,6 +60,86 @@ class ModrecDataset(Dataset):
             raise ValueError(f"Unsupported representation: {self.representation}")
 
         return torch.from_numpy(features).float(), torch.tensor(y, dtype=torch.long)
+
+
+def get_data_loader(
+    signals: np.ndarray,
+    metadata: pl.DataFrame,
+    indices: np.ndarray,
+    label_to_id: Dict[str, int],
+    model_name: str,
+    channel_format: str = "real_imag",
+    remove_cfo: bool = False,
+    cfo_estimator: str = "lag_correlation",
+    batch_size: int = 64,
+    shuffle: bool = False,
+    num_workers: int = 0,
+    spectrogram_size: int = 64,
+    **loader_kwargs,
+) -> DataLoader:
+    dataset = ModrecDataset(
+        signals=signals,
+        metadata=metadata,
+        indices=indices,
+        label_to_id=label_to_id,
+        representation=representation_for_model(model_name),
+        channel_format=channel_format,
+        remove_cfo=remove_cfo,
+        cfo_estimator=cfo_estimator,
+        spectrogram_size=spectrogram_size,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        **loader_kwargs,
+    )
+
+
+def load_dataset_loader(
+    dataset_dir: str | Path,
+    model_name: str,
+    indices: np.ndarray | None = None,
+    label_to_id: Dict[str, int] | None = None,
+    channel_format: str = "real_imag",
+    remove_cfo: bool = False,
+    cfo_estimator: str = "lag_correlation",
+    batch_size: int = 64,
+    shuffle: bool = False,
+    num_workers: int = 0,
+    spectrogram_size: int = 64,
+    **loader_kwargs,
+) -> Tuple[DataLoader, np.ndarray, pl.DataFrame, Dict[str, int]]:
+    signals, metadata = load_dataset(str(dataset_dir))
+    if indices is None:
+        indices = np.arange(signals.shape[0], dtype=np.int64)
+    if label_to_id is None:
+        labels = ordered_modulation_labels(metadata["modulation"].unique().to_list())
+        label_to_id = {label: idx for idx, label in enumerate(labels)}
+
+    loader = get_data_loader(
+        signals=signals,
+        metadata=metadata,
+        indices=indices,
+        label_to_id=label_to_id,
+        model_name=model_name,
+        channel_format=channel_format,
+        remove_cfo=remove_cfo,
+        cfo_estimator=cfo_estimator,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        spectrogram_size=spectrogram_size,
+        **loader_kwargs,
+    )
+    return loader, signals, metadata, label_to_id
+
+
+def ordered_modulation_labels(observed_labels: List[str]) -> List[str]:
+    labels = [label for label in README_MODULATION_ORDER if label in observed_labels]
+    labels.extend(sorted(label for label in observed_labels if label not in labels))
+    return labels
 
 
 def normalize_signal(x: np.ndarray) -> np.ndarray:
@@ -118,12 +205,25 @@ def complex_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
     if channel_format == "real_imag":
         return np.stack((np.real(x), np.imag(x))).astype(np.float32)
     if channel_format == "mag_phase":
-        mag = np.abs(x)
+        mag = normalized_log_magnitude(x)
         phase = np.angle(x) / np.pi
-        mag = np.log1p(mag)
-        mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
         return np.stack((mag, phase)).astype(np.float32)
+    if channel_format == "mag_inst_freq":
+        mag = normalized_log_magnitude(x)
+        inst_freq = instantaneous_frequency(x)
+        return np.stack((mag, inst_freq)).astype(np.float32)
     raise ValueError(f"Unsupported channel format: {channel_format}")
+
+
+def normalized_log_magnitude(x: np.ndarray) -> np.ndarray:
+    mag = np.log1p(np.abs(x))
+    return ((mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)).astype(np.float32)
+
+
+def instantaneous_frequency(x: np.ndarray) -> np.ndarray:
+    phase = np.unwrap(np.angle(x))
+    inst_freq = np.diff(phase, prepend=phase[0]) / np.pi
+    return np.nan_to_num(inst_freq).astype(np.float32)
 
 
 def frequency_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
@@ -148,6 +248,14 @@ def spectrogram_channels(x: np.ndarray, channel_format: str, size: int = 64) -> 
         mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
         phase = phase / np.pi
         return np.stack((mag, phase)).astype(np.float32)
+    if channel_format == "mag_inst_freq":
+        mag = np.log1p(np.abs(zxx))
+        phase = np.unwrap(np.angle(zxx), axis=1)
+        inst_freq = np.diff(phase, axis=1, prepend=phase[:, :1]) / np.pi
+        mag = resize_2d(mag, size, size)
+        inst_freq = resize_2d(inst_freq, size, size)
+        mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
+        return np.stack((mag, np.nan_to_num(inst_freq))).astype(np.float32)
     raise ValueError(f"Unsupported channel format: {channel_format}")
 
 

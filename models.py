@@ -4,6 +4,14 @@ import torch
 import torch.nn as nn
 
 
+MODEL_REPRESENTATIONS = {
+    "time_cnn": "time",
+    "frequency_cnn": "frequency",
+    "spectrogram_cnn": "spectrogram",
+    "feature_mlp": "features",
+}
+
+
 class TimeCNN(nn.Module):
     def __init__(self, n_classes: int, n_samples: int, in_channels: int = 2) -> None:
         super().__init__()
@@ -66,13 +74,20 @@ class FeatureMLP(nn.Module):
         return self.net(x)
 
 
+def representation_for_model(model_name: str) -> str:
+    try:
+        return MODEL_REPRESENTATIONS[model_name]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported model: {model_name}") from exc
+
+
 def make_model(model_name: str, n_classes: int, n_samples: int) -> Tuple[nn.Module, str]:
     if model_name == "time_cnn":
-        return TimeCNN(n_classes, n_samples), "time"
+        return TimeCNN(n_classes, n_samples), representation_for_model(model_name)
     if model_name == "frequency_cnn":
-        return TimeCNN(n_classes, n_samples), "frequency"
+        return TimeCNN(n_classes, n_samples), representation_for_model(model_name)
     if model_name == "spectrogram_cnn":
-        return SpectrogramCNN(n_classes), "spectrogram"
+        return SpectrogramCNN(n_classes), representation_for_model(model_name)
     if model_name == "feature_mlp":
-        return FeatureMLP(n_classes, 10), "features"
+        return FeatureMLP(n_classes, 10), representation_for_model(model_name)
     raise ValueError(f"Unsupported model: {model_name}")
