@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3 /home/zjwil/dev/modrec/modrec1/mlflow/mlflow.db 'SELECT r.run_uuid, r.name, p.key, p.value *)",
+      "Bash(sqlite3 *)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(python *)"
+    ]
+  }
+}

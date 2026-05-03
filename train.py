@@ -1,7 +1,6 @@
 import argparse
 import copy
 import json
-import os
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -18,66 +17,27 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models import make_model
-from plotting import plot_accuracy_by_snr, plot_confusion_matrix
+from models import make_model, representation_for_model
+from plotting import plot_accuracy_by_snr, plot_calibration_by_snr, plot_confusion_matrix, plot_reliability_diagram
 from preprocessing import get_data_loader, ordered_modulation_labels
 from simulator import load_dataset
 
 
 CFO_ESTIMATORS = ("lag_correlation", "phase_slope", "spectral_centroid")
 CFO_SWEEP_MODES = ("raw", *CFO_ESTIMATORS)
-CHANNEL_FORMATS = ("real_imag", "mag_phase", "mag_inst_freq")
-MODEL_NAMES = ("time_cnn", "frequency_cnn", "spectrogram_cnn", "feature_mlp")
-MLFLOW_PROFILES = ("local", "runpod")
+CHANNEL_FORMATS = ("real_imag", "mag", "mag_phase", "mag_inst_freq")
+MODEL_NAMES = ("time_cnn", "frequency_cnn", "spectrogram_cnn", "feature_mlp", "resnet_1d", "complex_cnn_1d", "dilated_cnn_1d")
+SNR_BIN_WIDTH = 4.0
+MLFLOW_DIR = Path("mlflow").absolute()
+MLFLOW_DB = MLFLOW_DIR / "mlflow.db"
+MLFLOW_ARTIFACTS = MLFLOW_DIR / "artifacts"
+MLFLOW_STAGING = MLFLOW_DIR / "staging"
+EXPERIMENT_NAME = "modrec"
 
 
 def sync_if_cuda(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-
-
-def new_profile_stats(limit: int) -> Dict[str, float]:
-    return {
-        "limit": float(limit),
-        "batches": 0.0,
-        "samples": 0.0,
-        "data_wait_sec": 0.0,
-        "host_to_device_sec": 0.0,
-        "compute_sec": 0.0,
-        "mlflow_metric_log_sec": 0.0,
-        "artifact_log_sec": 0.0,
-    }
-
-
-def log_profile_stats(stats: Dict[str, float], prefix: str = "profile") -> None:
-    batches = int(stats["batches"])
-    if batches <= 0:
-        return
-
-    samples = max(stats["samples"], 1.0)
-    total_batch_sec = stats["data_wait_sec"] + stats["host_to_device_sec"] + stats["compute_sec"]
-    metrics = {
-        f"{prefix}_batches": batches,
-        f"{prefix}_samples": int(stats["samples"]),
-        f"{prefix}_data_wait_sec": stats["data_wait_sec"],
-        f"{prefix}_host_to_device_sec": stats["host_to_device_sec"],
-        f"{prefix}_compute_sec": stats["compute_sec"],
-        f"{prefix}_mlflow_metric_log_sec": stats["mlflow_metric_log_sec"],
-        f"{prefix}_artifact_log_sec": stats["artifact_log_sec"],
-        f"{prefix}_data_wait_ms_per_batch": 1000.0 * stats["data_wait_sec"] / batches,
-        f"{prefix}_host_to_device_ms_per_batch": 1000.0 * stats["host_to_device_sec"] / batches,
-        f"{prefix}_compute_ms_per_batch": 1000.0 * stats["compute_sec"] / batches,
-        f"{prefix}_samples_per_sec": samples / max(total_batch_sec, np.finfo(float).eps),
-    }
-    mlflow.log_metrics(metrics)
-    print(
-        "Profile "
-        f"batches={batches} "
-        f"data_wait={metrics[f'{prefix}_data_wait_ms_per_batch']:.2f}ms/batch "
-        f"h2d={metrics[f'{prefix}_host_to_device_ms_per_batch']:.2f}ms/batch "
-        f"compute={metrics[f'{prefix}_compute_ms_per_batch']:.2f}ms/batch "
-        f"samples_per_sec={metrics[f'{prefix}_samples_per_sec']:.0f}"
-    )
 
 
 def stratified_split(labels: np.ndarray, train_frac: float, val_frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -101,6 +61,22 @@ def stratified_split(labels: np.ndarray, train_frac: float, val_frac: float, see
         stratify=temp_labels,
     )
     return train_idx.astype(np.int64), val_idx.astype(np.int64), test_idx.astype(np.int64)
+
+
+def stratified_train_val_split(labels: np.ndarray, train_frac: float, val_frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+    total_frac = train_frac + val_frac
+    if train_frac <= 0 or val_frac <= 0 or total_frac <= 0:
+        raise ValueError("Expected positive train and validation fractions.")
+
+    indices = np.arange(len(labels))
+    val_relative_frac = val_frac / total_frac
+    train_idx, val_idx = train_test_split(
+        indices,
+        test_size=val_relative_frac,
+        random_state=seed,
+        stratify=labels,
+    )
+    return train_idx.astype(np.int64), val_idx.astype(np.int64)
 
 
 def dataset_sample_indices(labels: np.ndarray, sample_frac: float, max_examples: int | None, seed: int) -> np.ndarray:
@@ -151,23 +127,32 @@ def stratified_subset_indices(labels: np.ndarray, target: int, seed: int) -> np.
 def train_one_model(
     args: argparse.Namespace,
     model_name: str,
-    signals: np.ndarray,
-    metadata: pl.DataFrame,
-    labels: np.ndarray,
+    train_signals: np.ndarray,
+    train_metadata: pl.DataFrame,
+    val_signals: np.ndarray,
+    val_metadata: pl.DataFrame,
+    test_signals: np.ndarray,
+    test_metadata: pl.DataFrame,
     label_to_id: Dict[str, int],
     id_to_label: Dict[int, str],
     splits: Tuple[np.ndarray, np.ndarray, np.ndarray],
 ) -> Dict:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
-    model, representation = make_model(model_name, len(label_to_id), signals.shape[1])
+    representation = representation_for_model(model_name)
+    model, representation = make_model(
+        model_name,
+        len(label_to_id),
+        train_signals.shape[1],
+        in_channels=input_channels_for(representation, args.channel_format),
+    )
     model.to(device)
     mlflow.log_param("model_name", model_name)
     mlflow.log_param("representation", representation)
 
     train_idx, val_idx, test_idx = splits
     train_loader = get_data_loader(
-        signals,
-        metadata,
+        train_signals,
+        train_metadata,
         train_idx,
         label_to_id,
         model_name=model_name,
@@ -179,8 +164,8 @@ def train_one_model(
         num_workers=args.num_workers,
     )
     val_loader = get_data_loader(
-        signals,
-        metadata,
+        val_signals,
+        val_metadata,
         val_idx,
         label_to_id,
         model_name=model_name,
@@ -192,8 +177,8 @@ def train_one_model(
         num_workers=args.num_workers,
     )
     test_loader = get_data_loader(
-        signals,
-        metadata,
+        test_signals,
+        test_metadata,
         test_idx,
         label_to_id,
         model_name=model_name,
@@ -208,7 +193,6 @@ def train_one_model(
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best_state = None
     best_val_acc = -1.0
-    profile_stats = new_profile_stats(args.profile_batches) if args.profile_batches > 0 else None
 
     epoch_bar = tqdm(range(1, args.epochs + 1), desc=model_name, unit="epoch")
     for epoch in epoch_bar:
@@ -222,54 +206,29 @@ def train_one_model(
             unit="batch",
             leave=False,
         )
-        next_batch_start = time.perf_counter()
         for xb, yb in train_bar:
-            batch_ready = time.perf_counter()
-            should_profile = profile_stats is not None and profile_stats["batches"] < profile_stats["limit"]
-            if should_profile:
-                profile_stats["data_wait_sec"] += batch_ready - next_batch_start
-
             sync_if_cuda(device)
-            h2d_start = time.perf_counter()
             xb, yb = xb.to(device), yb.to(device)
             sync_if_cuda(device)
-            compute_start = time.perf_counter()
 
             optimizer.zero_grad(set_to_none=True)
             loss = F.cross_entropy(model(xb), yb)
             loss.backward()
             optimizer.step()
             sync_if_cuda(device)
-            compute_end = time.perf_counter()
-
-            if should_profile:
-                profile_stats["batches"] += 1
-                profile_stats["samples"] += len(yb)
-                profile_stats["host_to_device_sec"] += compute_start - h2d_start
-                profile_stats["compute_sec"] += compute_end - compute_start
 
             total_loss += loss.item() * len(yb)
             train_bar.set_postfix(loss=f"{loss.item():.4f}")
-            next_batch_start = time.perf_counter()
 
         train_duration = time.perf_counter() - train_start
-        val_start = time.perf_counter()
         val_metrics = evaluate(model, val_loader, device, len(label_to_id), desc="val")
-        val_duration = time.perf_counter() - val_start
         train_loss = total_loss / max(len(train_loader.dataset), 1)
         epoch_duration = time.perf_counter() - epoch_start
         train_samples_per_sec = len(train_loader.dataset) / max(train_duration, np.finfo(float).eps)
-        val_samples_per_sec = len(val_loader.dataset) / max(val_duration, np.finfo(float).eps)
-        metric_log_start = time.perf_counter()
         mlflow.log_metric("train_loss", train_loss, step=epoch)
         mlflow.log_metric("val_accuracy", val_metrics["accuracy"], step=epoch)
         mlflow.log_metric("epoch_duration_sec", epoch_duration, step=epoch)
-        mlflow.log_metric("train_duration_sec", train_duration, step=epoch)
-        mlflow.log_metric("val_duration_sec", val_duration, step=epoch)
         mlflow.log_metric("train_samples_per_sec", train_samples_per_sec, step=epoch)
-        mlflow.log_metric("val_samples_per_sec", val_samples_per_sec, step=epoch)
-        if profile_stats is not None:
-            profile_stats["mlflow_metric_log_sec"] += time.perf_counter() - metric_log_start
         epoch_bar.set_postfix(
             train_loss=f"{train_loss:.4f}",
             val_acc=f"{val_metrics['accuracy']:.4f}",
@@ -282,14 +241,12 @@ def train_one_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    test_start = time.perf_counter()
     test_metrics = evaluate(model, test_loader, device, len(label_to_id), desc="test")
-    test_duration = time.perf_counter() - test_start
-    test_samples_per_sec = len(test_loader.dataset) / max(test_duration, np.finfo(float).eps)
-    snr_summary = accuracy_by_snr(metadata, test_idx, test_metrics["y_true"], test_metrics["y_pred"], args.snr_bin_width)
+    snr_summary = accuracy_by_snr(test_metadata, test_idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
     labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
     class_summary = per_class_metrics(test_metrics["y_true"], test_metrics["y_pred"], labels_ordered)
-    artifact_dir = Path(args.artifact_staging_dir) / mlflow.active_run().info.run_id
+    artifact_dir = MLFLOW_STAGING / mlflow.active_run().info.run_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     confusion_path = artifact_dir / "confusion_matrix.png"
     snr_plot_path = artifact_dir / "accuracy_vs_snr.png"
     snr_csv_path = artifact_dir / "accuracy_vs_snr.csv"
@@ -298,50 +255,69 @@ def train_one_model(
     plot_accuracy_by_snr(snr_summary, snr_plot_path, model_name)
     snr_summary.write_csv(snr_csv_path)
     class_summary.write_csv(class_csv_path)
-    artifact_log_start = time.perf_counter()
+    calib_df, ece, mce = calibration_stats(
+        test_metrics["y_true"], test_metrics["confidence"], test_metrics["y_pred"]
+    )
+    calib_snr_df = calibration_by_snr(
+        test_metadata, test_idx, test_metrics["y_true"], test_metrics["confidence"], test_metrics["y_pred"], SNR_BIN_WIDTH
+    )
+    reliability_path = artifact_dir / "reliability_diagram.png"
+    calib_csv_path = artifact_dir / "calibration_stats.csv"
+    calib_snr_plot_path = artifact_dir / "calibration_by_snr.png"
+    calib_snr_csv_path = artifact_dir / "calibration_by_snr.csv"
+    plot_reliability_diagram(calib_df, ece, mce, reliability_path, model_name)
+    plot_calibration_by_snr(calib_snr_df, calib_snr_plot_path, model_name)
+    calib_df.write_csv(calib_csv_path)
+    calib_snr_df.write_csv(calib_snr_csv_path)
     mlflow.log_artifact(str(confusion_path), artifact_path="plots")
     mlflow.log_artifact(str(snr_plot_path), artifact_path="plots")
+    mlflow.log_artifact(str(reliability_path), artifact_path="plots")
+    mlflow.log_artifact(str(calib_snr_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(snr_csv_path), artifact_path="tables")
     mlflow.log_artifact(str(class_csv_path), artifact_path="tables")
-    if profile_stats is not None:
-        profile_stats["artifact_log_sec"] += time.perf_counter() - artifact_log_start
-
+    mlflow.log_artifact(str(calib_csv_path), artifact_path="tables")
+    mlflow.log_artifact(str(calib_snr_csv_path), artifact_path="tables")
     mlflow.log_metric("test_accuracy", test_metrics["accuracy"])
     mlflow.log_metric("best_val_accuracy", best_val_acc)
-    mlflow.log_metric("test_duration_sec", test_duration)
-    mlflow.log_metric("test_samples_per_sec", test_samples_per_sec)
+    mlflow.log_metric("test_ece", ece)
+    mlflow.log_metric("test_mce", mce)
     log_prf_metrics(test_metrics["y_true"], test_metrics["y_pred"], labels_ordered)
-    if profile_stats is not None:
-        log_profile_stats(profile_stats)
     return {
         "model": model_name,
         "representation": representation,
         "best_val_accuracy": best_val_acc,
         "test_accuracy": test_metrics["accuracy"],
+        "test_ece": ece,
+        "test_mce": mce,
         "confusion": test_metrics["confusion"],
         "accuracy_by_snr": snr_summary,
         "per_class_metrics": class_summary,
+        "calibration_stats": calib_df,
         "confusion_path": str(confusion_path),
     }
 
 
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, n_classes: int, desc: str = "eval") -> Dict:
     model.eval()
-    y_true, y_pred = [], []
+    y_true, y_pred, y_conf = [], [], []
     with torch.no_grad():
         for xb, yb in tqdm(loader, desc=desc, unit="batch", leave=False):
             logits = model(xb.to(device))
-            pred = torch.argmax(logits, dim=1).cpu().numpy()
-            y_pred.extend(pred.tolist())
-            y_true.extend(yb.numpy().tolist())
+            probs = torch.softmax(logits, dim=1)
+            conf, pred = probs.max(dim=1)
+            y_conf.extend(conf.cpu().tolist())
+            y_pred.extend(pred.cpu().tolist())
+            y_true.extend(yb.tolist())
     y_true_np = np.asarray(y_true, dtype=int)
     y_pred_np = np.asarray(y_pred, dtype=int)
+    y_conf_np = np.asarray(y_conf, dtype=np.float32)
     labels = np.arange(n_classes)
     return {
         "accuracy": float(accuracy_score(y_true_np, y_pred_np)) if len(y_true_np) else 0.0,
         "confusion": confusion_matrix(y_true_np, y_pred_np, labels=labels),
         "y_true": y_true_np,
         "y_pred": y_pred_np,
+        "confidence": y_conf_np,
     }
 
 
@@ -410,6 +386,64 @@ def accuracy_by_snr(
     return pl.DataFrame(rows)
 
 
+def calibration_by_snr(
+    metadata: pl.DataFrame,
+    test_idx: np.ndarray,
+    y_true: np.ndarray,
+    y_conf: np.ndarray,
+    y_pred: np.ndarray,
+    bin_width: float,
+) -> pl.DataFrame:
+    snr = metadata[test_idx]["snr_db"].to_numpy()
+    bins = np.floor(snr / bin_width) * bin_width
+    rows = []
+    for bin_start in sorted(np.unique(bins)):
+        mask = bins == bin_start
+        n = int(mask.sum())
+        acc = float((y_pred[mask] == y_true[mask]).mean()) if n > 0 else float("nan")
+        mean_conf = float(y_conf[mask].mean()) if n > 0 else float("nan")
+        ece = abs(acc - mean_conf) if n > 0 else float("nan")
+        rows.append({
+            "snr_bin_db": float(bin_start),
+            "snr_bin_end_db": float(bin_start + bin_width),
+            "n": n,
+            "accuracy": acc,
+            "mean_confidence": mean_conf,
+            "ece": ece,
+        })
+    return pl.DataFrame(rows)
+
+
+def calibration_stats(
+    y_true: np.ndarray,
+    y_conf: np.ndarray,
+    y_pred: np.ndarray,
+    n_bins: int = 10,
+) -> Tuple[pl.DataFrame, float, float]:
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    rows = []
+    for i in range(n_bins):
+        lo, hi = float(bin_edges[i]), float(bin_edges[i + 1])
+        mask = (y_conf >= lo) & (y_conf <= hi if i == n_bins - 1 else y_conf < hi)
+        n = int(mask.sum())
+        rows.append({
+            "bin_lower": lo,
+            "bin_upper": hi,
+            "bin_midpoint": (lo + hi) / 2,
+            "accuracy": float((y_pred[mask] == y_true[mask]).mean()) if n > 0 else float("nan"),
+            "mean_confidence": float(y_conf[mask].mean()) if n > 0 else float("nan"),
+            "count": n,
+        })
+    df = pl.DataFrame(rows)
+    occupied = df.filter(pl.col("count") > 0)
+    n_total = max(len(y_true), 1)
+    weights = occupied["count"].to_numpy() / n_total
+    gaps = np.abs(occupied["accuracy"].to_numpy() - occupied["mean_confidence"].to_numpy())
+    ece = float(np.dot(weights, gaps))
+    mce = float(np.max(gaps)) if len(gaps) > 0 else 0.0
+    return df, ece, mce
+
+
 def write_summary(
     path: Path,
     run_id: str,
@@ -420,11 +454,16 @@ def write_summary(
     lines = [
         "ModRec supervised baseline summary",
         f"MLflow run id: {run_id}",
-        f"Dataset: {args.dataset_dir}",
+        f"Training dataset: {args.dataset_dir}",
+        f"Validation dataset: {args.val_dataset_dir_effective}",
+        f"Test dataset: {args.test_dataset_dir_effective}",
+        f"Test source: {args.test_dataset_source}",
         f"Models: {', '.join(result['model'] for result in results)}",
         f"Labels: {', '.join(labels)}",
-        f"Examples available: {getattr(args, 'n_examples_available', 'unknown')}",
-        f"Examples used: {getattr(args, 'n_examples_used', 'unknown')}",
+        f"Train dataset examples available: {getattr(args, 'n_train_dataset_examples_available', 'unknown')}",
+        f"Train dataset examples used: {getattr(args, 'n_train_dataset_examples_used', 'unknown')}",
+        f"Test dataset examples available: {getattr(args, 'n_test_dataset_examples_available', 'unknown')}",
+        f"Test dataset examples used: {getattr(args, 'n_test_dataset_examples_used', 'unknown')}",
         f"Split sizes: train={getattr(args, 'n_train_examples', 'unknown')}, val={getattr(args, 'n_val_examples', 'unknown')}, test={getattr(args, 'n_test_examples', 'unknown')}",
         f"Epochs: {args.epochs}",
         f"Batch size: {args.batch_size}",
@@ -437,6 +476,8 @@ def write_summary(
                 f"Representation: {result['representation']}",
                 f"Best val accuracy: {result['best_val_accuracy']:.4f}",
                 f"Test accuracy: {result['test_accuracy']:.4f}",
+                f"ECE: {result['test_ece']:.4f}",
+                f"MCE: {result['test_mce']:.4f}",
                 "Accuracy versus SNR:",
                 result["accuracy_by_snr"].write_csv(),
                 "Confusion matrix counts:",
@@ -460,24 +501,23 @@ def matrix_to_text(matrix: np.ndarray, labels: List[str]) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train simple supervised ModRec baselines.")
+    parser = argparse.ArgumentParser(description="Train ModRec baselines.")
     parser.add_argument("command", nargs="?", choices=("train", "sweep"), default="train")
-    parser.add_argument("--dataset-dir", default="data/awgn_sobol")
-    parser.add_argument("--mlflow-profile", choices=MLFLOW_PROFILES, default=os.getenv("MODREC_MLFLOW_PROFILE", "local"))
-    parser.add_argument("--mlflow-tracking-uri", default=os.getenv("MLFLOW_TRACKING_URI"))
-    parser.add_argument("--mlflow-dir", default=None)
-    parser.add_argument("--mlflow-db", default=None)
-    parser.add_argument("--artifact-staging-dir", default=None)
-    parser.add_argument("--experiment", default="modrec-supervised-baselines")
+    parser.add_argument("--dataset-dir", default="data/awgn_snr0_30")
+    parser.add_argument(
+        "--test-dataset-dir",
+        default=None,
+        help="Optional external dataset for final test/OOD evaluation. Defaults to a held-out split of --dataset-dir.",
+    )
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["time_cnn", "frequency_cnn", "feature_mlp"],
+        default=["time_cnn", "resnet_1d"],
         choices=MODEL_NAMES,
     )
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--sample-frac", type=float, default=1.0)
@@ -496,53 +536,37 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sweep-channel-formats", nargs="+", choices=CHANNEL_FORMATS, default=list(CHANNEL_FORMATS))
     parser.add_argument("--sweep-cfo-estimators", nargs="+", choices=CFO_SWEEP_MODES, default=list(CFO_SWEEP_MODES))
     parser.add_argument("--sweep-batch-sizes", nargs="+", type=int, default=None)
-    parser.add_argument("--snr-bin-width", type=float, default=4.0)
-    parser.add_argument("--profile-batches", type=int, default=0)
-    parser.add_argument("--system-metrics", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--system-metrics-interval", type=int, default=10)
     return parser
 
 
-def default_mlflow_paths(profile: str) -> Tuple[Path, Path, Path]:
-    if profile == "runpod":
-        root = Path("/workspace/mlflow")
-    else:
-        root = Path("mlflow")
-    return root / "artifacts", root / "mlflow.db", root / "staging"
+def input_channels_for(representation: str, channel_format: str) -> int:
+    if representation == "features":
+        return 1
+    if channel_format == "mag":
+        if representation == "spectrogram":
+            raise ValueError("--channel-format mag is not supported for spectrogram models.")
+        return 1
+    return 2
 
 
-def configure_mlflow(args: argparse.Namespace) -> None:
-    default_artifact_root, default_db_path, default_staging_dir = default_mlflow_paths(args.mlflow_profile)
-    artifact_root = Path(args.mlflow_dir or default_artifact_root).absolute()
-    db_path = Path(args.mlflow_db or default_db_path).absolute()
-    args.mlflow_dir = str(artifact_root)
-    args.mlflow_db = str(db_path)
-    args.artifact_staging_dir = str(Path(args.artifact_staging_dir or default_staging_dir).absolute())
-
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    Path(args.artifact_staging_dir).mkdir(parents=True, exist_ok=True)
-
-    if args.mlflow_tracking_uri:
-        mlflow.set_tracking_uri(args.mlflow_tracking_uri)
-    else:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        mlflow.set_tracking_uri(f"sqlite:///{db_path}")
-
+def configure_mlflow() -> None:
+    MLFLOW_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    MLFLOW_STAGING.mkdir(parents=True, exist_ok=True)
+    mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_DB.absolute()}")
     client = MlflowClient()
-    experiment = client.get_experiment_by_name(args.experiment)
+    experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
     if experiment is None:
-        if args.mlflow_tracking_uri:
-            client.create_experiment(args.experiment)
-        else:
-            client.create_experiment(args.experiment, artifact_location=artifact_root.as_uri())
-
-    mlflow.set_experiment(args.experiment)
-    mlflow.set_experiment_tag("mlflow_profile", args.mlflow_profile)
-    mlflow.set_experiment_tag("tracking_uri", mlflow.get_tracking_uri())
-    mlflow.set_experiment_tag("artifact_root", str(artifact_root))
-    if args.system_metrics:
-        mlflow.set_system_metrics_sampling_interval(args.system_metrics_interval)
-        mlflow.enable_system_metrics_logging()
+        client.create_experiment(EXPERIMENT_NAME, artifact_location=MLFLOW_ARTIFACTS.as_uri())
+    else:
+        desired = MLFLOW_ARTIFACTS.absolute().as_uri()
+        if getattr(experiment, "artifact_location", None) != desired:
+            import sqlite3
+            with sqlite3.connect(str(MLFLOW_DB.absolute())) as con:
+                con.execute(
+                    "update experiments set artifact_location=? where experiment_id=?",
+                    (desired, experiment.experiment_id),
+                )
+    mlflow.set_experiment(EXPERIMENT_NAME)
 
 
 def cfo_label(args: argparse.Namespace) -> str:
@@ -583,10 +607,6 @@ def iter_sweep_args(args: argparse.Namespace) -> List[argparse.Namespace]:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.mlflow_profile not in MLFLOW_PROFILES:
-        raise ValueError(f"--mlflow-profile must be one of: {', '.join(MLFLOW_PROFILES)}.")
-    if args.profile_batches < 0:
-        raise ValueError("--profile-batches must be non-negative.")
     if args.num_workers < 0:
         raise ValueError("--num-workers must be non-negative.")
     if args.command == "train" and args.remove_cfo and args.cfo_estimator == "raw":
@@ -595,10 +615,30 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Expected at least one CFO sweep mode.")
 
 
-def log_common_params(args: argparse.Namespace, signals: np.ndarray, labels: List[str], sweep_index: int, sweep_total: int) -> None:
+def validate_known_labels(metadata: pl.DataFrame, labels: List[str], dataset_dir: str, role: str) -> None:
+    unknown = sorted(set(metadata["modulation"].unique().to_list()) - set(labels))
+    if unknown:
+        raise ValueError(
+            f"{role} dataset {dataset_dir} contains labels not present in the training dataset: "
+            f"{', '.join(unknown)}."
+        )
+
+
+def log_common_params(
+    args: argparse.Namespace,
+    train_signals: np.ndarray,
+    test_signals: np.ndarray,
+    labels: List[str],
+    sweep_index: int,
+    sweep_total: int,
+) -> None:
     mlflow.log_params(
         {
             "dataset_dir": args.dataset_dir,
+            "train_dataset_dir": args.dataset_dir,
+            "val_dataset_dir": args.val_dataset_dir_effective,
+            "test_dataset_dir": args.test_dataset_dir_effective,
+            "test_dataset_source": args.test_dataset_source,
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "num_workers": args.num_workers,
@@ -606,11 +646,16 @@ def log_common_params(args: argparse.Namespace, signals: np.ndarray, labels: Lis
             "weight_decay": args.weight_decay,
             "sample_frac": args.sample_frac,
             "max_examples": args.max_examples if args.max_examples is not None else "none",
-            "profile_batches": args.profile_batches,
             "seed": args.seed,
-            "n_samples": signals.shape[1],
-            "n_examples": args.n_examples_used,
-            "n_examples_available": args.n_examples_available,
+            "n_samples": train_signals.shape[1],
+            "train_n_samples": train_signals.shape[1],
+            "test_n_samples": test_signals.shape[1],
+            "n_examples": args.n_train_dataset_examples_used,
+            "n_examples_available": args.n_train_dataset_examples_available,
+            "n_train_dataset_examples_available": args.n_train_dataset_examples_available,
+            "n_train_dataset_examples_used": args.n_train_dataset_examples_used,
+            "n_test_dataset_examples_available": args.n_test_dataset_examples_available,
+            "n_test_dataset_examples_used": args.n_test_dataset_examples_used,
             "n_train_examples": args.n_train_examples,
             "n_val_examples": args.n_val_examples,
             "n_test_examples": args.n_test_examples,
@@ -627,9 +672,12 @@ def log_common_params(args: argparse.Namespace, signals: np.ndarray, labels: Lis
 def run_config(
     args: argparse.Namespace,
     model_name: str,
-    signals: np.ndarray,
-    metadata: pl.DataFrame,
-    label_values: np.ndarray,
+    train_signals: np.ndarray,
+    train_metadata: pl.DataFrame,
+    val_signals: np.ndarray,
+    val_metadata: pl.DataFrame,
+    test_signals: np.ndarray,
+    test_metadata: pl.DataFrame,
     label_to_id: Dict[str, int],
     id_to_label: Dict[int, str],
     labels: List[str],
@@ -638,9 +686,21 @@ def run_config(
     sweep_total: int,
 ) -> None:
     with mlflow.start_run(run_name=run_name_for(args, model_name)) as run:
-        log_common_params(args, signals, labels, sweep_index, sweep_total)
-        result = train_one_model(args, model_name, signals, metadata, label_values, label_to_id, id_to_label, splits)
-        summary_path = Path(args.mlflow_dir) / f"performance_summary_{run.info.run_id}.txt"
+        log_common_params(args, train_signals, test_signals, labels, sweep_index, sweep_total)
+        result = train_one_model(
+            args,
+            model_name,
+            train_signals,
+            train_metadata,
+            val_signals,
+            val_metadata,
+            test_signals,
+            test_metadata,
+            label_to_id,
+            id_to_label,
+            splits,
+        )
+        summary_path = MLFLOW_ARTIFACTS / f"performance_summary_{run.info.run_id}.txt"
         write_summary(summary_path, run.info.run_id, args, labels, [result])
         mlflow.log_artifact(str(summary_path), artifact_path="summaries")
         print(summary_path)
@@ -651,27 +711,62 @@ def main() -> None:
     validate_args(args)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    signals, metadata = load_dataset(args.dataset_dir)
-    observed_labels = metadata["modulation"].unique().to_list()
+    train_signals, train_metadata = load_dataset(args.dataset_dir)
+    observed_labels = train_metadata["modulation"].unique().to_list()
     labels = ordered_modulation_labels(observed_labels)
     label_to_id = {label: idx for idx, label in enumerate(labels)}
     id_to_label = {idx: label for label, idx in label_to_id.items()}
-    full_label_values = metadata["modulation"].to_numpy()
-    dataset_idx = dataset_sample_indices(full_label_values, args.sample_frac, args.max_examples, args.seed)
-    label_values = full_label_values[dataset_idx]
-    relative_splits = stratified_split(label_values, args.train_frac, args.val_frac, args.seed)
-    splits = tuple(dataset_idx[idx] for idx in relative_splits)
-    args.n_examples_available = int(signals.shape[0])
-    args.n_examples_used = int(len(dataset_idx))
+
+    full_train_labels = train_metadata["modulation"].to_numpy()
+    train_dataset_idx = dataset_sample_indices(full_train_labels, args.sample_frac, args.max_examples, args.seed)
+    sampled_train_labels = full_train_labels[train_dataset_idx]
+
+    args.val_dataset_dir_effective = args.dataset_dir
+    if args.test_dataset_dir:
+        test_signals, test_metadata = load_dataset(args.test_dataset_dir)
+        validate_known_labels(test_metadata, labels, args.test_dataset_dir, "Test")
+        full_test_labels = test_metadata["modulation"].to_numpy()
+        test_idx = dataset_sample_indices(full_test_labels, args.sample_frac, args.max_examples, args.seed)
+        train_rel_idx, val_rel_idx = stratified_train_val_split(
+            sampled_train_labels,
+            args.train_frac,
+            args.val_frac,
+            args.seed,
+        )
+        splits = (train_dataset_idx[train_rel_idx], train_dataset_idx[val_rel_idx], test_idx)
+        args.test_dataset_dir_effective = args.test_dataset_dir
+        args.test_dataset_source = "external_dataset"
+    else:
+        test_signals, test_metadata = train_signals, train_metadata
+        relative_splits = stratified_split(sampled_train_labels, args.train_frac, args.val_frac, args.seed)
+        splits = tuple(train_dataset_idx[idx] for idx in relative_splits)
+        args.test_dataset_dir_effective = args.dataset_dir
+        args.test_dataset_source = "heldout_split"
+
+    val_signals, val_metadata = train_signals, train_metadata
+    args.n_train_dataset_examples_available = int(train_signals.shape[0])
+    args.n_train_dataset_examples_used = int(len(train_dataset_idx))
+    args.n_test_dataset_examples_available = int(test_signals.shape[0])
+    args.n_test_dataset_examples_used = int(len(splits[2]))
     args.n_train_examples = int(len(splits[0]))
     args.n_val_examples = int(len(splits[1]))
     args.n_test_examples = int(len(splits[2]))
-    print(
-        f"Using {args.n_examples_used}/{args.n_examples_available} examples: "
-        f"train={args.n_train_examples}, val={args.n_val_examples}, test={args.n_test_examples}."
-    )
+    if args.test_dataset_dir:
+        print(
+            f"Using {args.n_train_dataset_examples_used}/{args.n_train_dataset_examples_available} training-source examples: "
+            f"train={args.n_train_examples}, val={args.n_val_examples}."
+        )
+        print(
+            f"Testing on external dataset {args.test_dataset_dir}: "
+            f"{args.n_test_dataset_examples_used}/{args.n_test_dataset_examples_available} examples."
+        )
+    else:
+        print(
+            f"Using {args.n_train_dataset_examples_used}/{args.n_train_dataset_examples_available} examples: "
+            f"train={args.n_train_examples}, val={args.n_val_examples}, test={args.n_test_examples}."
+        )
 
-    configure_mlflow(args)
+    configure_mlflow()
 
     configs = iter_sweep_args(args) if args.command == "sweep" else [args]
     print(f"Running {len(configs)} configuration(s).")
@@ -684,9 +779,12 @@ def main() -> None:
             run_config(
                 cfg,
                 model_name,
-                signals,
-                metadata,
-                label_values,
+                train_signals,
+                train_metadata,
+                val_signals,
+                val_metadata,
+                test_signals,
+                test_metadata,
                 label_to_id,
                 id_to_label,
                 labels,

@@ -4,6 +4,7 @@ from typing import Iterable, List, Optional, Sequence
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -221,6 +222,97 @@ def plot_confusion_matrix(matrix: np.ndarray, labels: List[str], path: Path, tit
         for j in range(matrix.shape[1]):
             ax.text(j, i, str(matrix[i, j]), ha="center", va="center", fontsize=7)
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def plot_reliability_diagram(
+    calib_df: pl.DataFrame,
+    ece: float,
+    mce: float,
+    path: Path,
+    title: str,
+) -> None:
+    lowers = calib_df["bin_lower"].to_numpy()
+    uppers = calib_df["bin_upper"].to_numpy()
+    mids = calib_df["bin_midpoint"].to_numpy()
+    accuracy = calib_df["accuracy"].to_numpy(allow_copy=True)
+    counts = calib_df["count"].to_numpy()
+    bin_width = float(uppers[0] - lowers[0]) if len(uppers) > 0 else 0.1
+    n_total = max(int(counts.sum()), 1)
+    bar_w = bin_width * 0.8
+
+    fig, (ax_cal, ax_hist) = plt.subplots(
+        2, 1, figsize=(5, 6), gridspec_kw={"height_ratios": [3, 1]}, sharex=True
+    )
+
+    ax_cal.plot([0, 1], [0, 1], "--", color="0.5", linewidth=1.0)
+    for mid, acc, n in zip(mids, accuracy, counts):
+        if n == 0 or np.isnan(acc):
+            continue
+        ax_cal.bar(mid, acc, width=bar_w, color="#4C72B0", alpha=0.75, align="center")
+        if acc < mid:
+            ax_cal.bar(mid, mid - acc, width=bar_w, bottom=acc, color="#CC3333", alpha=0.4, align="center")
+        elif acc > mid:
+            ax_cal.bar(mid, acc - mid, width=bar_w, bottom=mid, color="#33AA55", alpha=0.4, align="center")
+
+    ax_cal.set_ylabel("Accuracy")
+    ax_cal.set_xlim(0, 1)
+    ax_cal.set_ylim(0, 1)
+    ax_cal.set_title(f"{title} reliability diagram\nECE={ece:.4f}  MCE={mce:.4f}")
+    ax_cal.grid(True, alpha=0.25)
+    ax_cal.legend(
+        handles=[
+            plt.Line2D([0], [0], linestyle="--", color="0.5", label="Perfect calibration"),
+            mpatches.Patch(color="#4C72B0", alpha=0.75, label="Accuracy"),
+            mpatches.Patch(color="#CC3333", alpha=0.6, label="Overconfident"),
+            mpatches.Patch(color="#33AA55", alpha=0.6, label="Underconfident"),
+        ],
+        fontsize=8,
+        loc="upper left",
+    )
+
+    ax_hist.bar(mids, counts / n_total, width=bar_w, color="#4C72B0", alpha=0.75, align="center")
+    ax_hist.set_xlabel("Confidence")
+    ax_hist.set_ylabel("Fraction")
+    ax_hist.grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def plot_calibration_by_snr(summary: pl.DataFrame, path: Path, title: str) -> None:
+    x = summary["snr_bin_db"].to_numpy()
+    acc = summary["accuracy"].to_numpy(allow_copy=True)
+    conf = summary["mean_confidence"].to_numpy(allow_copy=True)
+    ece = summary["ece"].to_numpy(allow_copy=True)
+
+    fig, (ax_gap, ax_ece) = plt.subplots(2, 1, figsize=(7, 6), gridspec_kw={"height_ratios": [2, 1]}, sharex=True)
+
+    ax_gap.plot(x, acc, marker="o", label="Accuracy", color="#4C72B0")
+    ax_gap.plot(x, conf, marker="s", linestyle="--", label="Mean confidence", color="#DD8452")
+    valid = ~(np.isnan(acc) | np.isnan(conf))
+    over = valid & (conf > acc)
+    under = valid & (acc >= conf)
+    ax_gap.fill_between(x, acc, conf, where=over, interpolate=True, alpha=0.25, color="#CC3333", label="Overconfident")
+    ax_gap.fill_between(x, acc, conf, where=under, interpolate=True, alpha=0.25, color="#33AA55", label="Underconfident")
+    ax_gap.set_ylabel("Value")
+    ax_gap.set_ylim(0, 1)
+    ax_gap.set_title(f"{title} calibration by SNR")
+    ax_gap.grid(True, alpha=0.25)
+    ax_gap.legend(fontsize=8, loc="lower right")
+
+    bar_w = (x[1] - x[0]) * 0.7 if len(x) > 1 else 2.0
+    ax_ece.bar(x, np.where(np.isnan(ece), 0, ece), width=bar_w, color="#4C72B0", alpha=0.75, align="center")
+    ax_ece.set_xlabel("SNR bin start (dB)")
+    ax_ece.set_ylabel("|acc − conf|")
+    ax_ece.set_ylim(0, None)
+    ax_ece.grid(True, alpha=0.25)
+
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)

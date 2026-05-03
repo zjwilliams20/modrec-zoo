@@ -480,10 +480,10 @@ def sample_parameter_design(
     sampler = params.get("sampler", "sobol")
     if sampler == "sobol":
         seed = params.get("seed")
-        sobol = qmc.Sobol(d=9, scramble=True, seed=seed)
+        sobol = qmc.Sobol(d=10, scramble=True, seed=seed)
         unit = sobol.random(n_signals)
     elif sampler == "random":
-        unit = rng.random((n_signals, 9))
+        unit = rng.random((n_signals, 10))
     else:
         raise ValueError(f"Unsupported sampler: {sampler}")
 
@@ -503,7 +503,7 @@ def sample_parameter_design(
                 "rician_k_db": scale_float(u[6], params["rician_k_range"]),
                 "n_taps": scale_int(u[7], params["n_taps_range"]),
                 "delay_spread_symbols": scale_float(u[8], params["delay_spread_symbols_range"]),
-                "delay_decay_symbols": scale_float((u[0] + u[8]) % 1.0, params["delay_decay_symbols_range"]),
+                "delay_decay_symbols": scale_float(u[9], params["delay_decay_symbols_range"]),
             }
         )
     return rows

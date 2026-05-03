@@ -204,6 +204,9 @@ def estimate_cfo_spectral_centroid(x: np.ndarray) -> float:
 def complex_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
     if channel_format == "real_imag":
         return np.stack((np.real(x), np.imag(x))).astype(np.float32)
+    if channel_format == "mag":
+        mag = normalized_log_magnitude(x)
+        return mag.astype(np.float32)[np.newaxis, :]
     if channel_format == "mag_phase":
         mag = normalized_log_magnitude(x)
         phase = np.angle(x) / np.pi
