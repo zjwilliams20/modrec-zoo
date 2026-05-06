@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "modrec-zoo"
 version = "0.1.0"
@@ -17,11 +21,14 @@ dependencies = [
 ]
 
 [project.scripts]
-simulate = "simulator:main"
-train = "train:main"
+modreczoo-simulate = "modreczoo.cli.simulate:main"
+modreczoo-train = "modreczoo.cli.train:main"
 
-[tool.uv]
-dev-dependencies = [
+[tool.hatch.build.targets.wheel]
+packages = ["src/modreczoo"]
+
+[dependency-groups]
+dev = [
     "jupyterlab",
     "ipympl",
 ]

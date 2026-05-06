@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
@@ -7,11 +7,29 @@ import scipy.signal as signal
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from models import representation_for_model
-from simulator import load_dataset
+from modreczoo.models import representation_for_model
 
 
+SIGNALS_FILE = "signals.npz"
+METADATA_FILE = "metadata.parquet"
 README_MODULATION_ORDER = ("2PSK", "4PSK", "8PSK", "pi/4-DQPSK", "16QAM", "64QAM", "256QAM", "MSK")
+
+
+def save_dataset(output_dir: str, signals: np.ndarray, metadata: pl.DataFrame, extras: Optional[Dict[str, np.ndarray]] = None) -> None:
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    arrays = {"signals": signals}
+    if extras:
+        arrays.update(extras)
+    np.savez_compressed(output / SIGNALS_FILE, **arrays)
+    metadata.write_parquet(output / METADATA_FILE)
+
+
+def load_dataset(output_dir: str) -> Tuple[np.ndarray, pl.DataFrame]:
+    output = Path(output_dir)
+    with np.load(output / SIGNALS_FILE) as data:
+        signals = data["signals"]
+    return signals, pl.read_parquet(output / METADATA_FILE)
 
 
 class ModrecDataset(Dataset):

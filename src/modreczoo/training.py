@@ -9,18 +9,22 @@ import mlflow
 import numpy as np
 import polars as pl
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from mlflow.tracking import MlflowClient
-from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models import make_model, representation_for_model
-from plotting import plot_accuracy_by_snr, plot_calibration_by_snr, plot_confusion_matrix, plot_reliability_diagram
-from preprocessing import get_data_loader, ordered_modulation_labels
-from simulator import load_dataset
+from modreczoo.data import get_data_loader
+from modreczoo.evaluation import (
+    accuracy_by_snr,
+    calibration_by_snr,
+    calibration_stats,
+    evaluate,
+    log_prf_metrics,
+    per_class_metrics,
+    write_summary,
+)
+from modreczoo.models import make_model, representation_for_model
 
 
 CFO_ESTIMATORS = ("lag_correlation", "phase_slope", "spectral_centroid")
@@ -251,6 +255,13 @@ def train_one_model(
     snr_plot_path = artifact_dir / "accuracy_vs_snr.png"
     snr_csv_path = artifact_dir / "accuracy_vs_snr.csv"
     class_csv_path = artifact_dir / "per_class_metrics.csv"
+    from modreczoo.plotting import (
+        plot_accuracy_by_snr,
+        plot_calibration_by_snr,
+        plot_confusion_matrix,
+        plot_reliability_diagram,
+    )
+
     plot_confusion_matrix(test_metrics["confusion"], labels_ordered, confusion_path, model_name)
     plot_accuracy_by_snr(snr_summary, snr_plot_path, model_name)
     snr_summary.write_csv(snr_csv_path)
@@ -295,248 +306,6 @@ def train_one_model(
         "calibration_stats": calib_df,
         "confusion_path": str(confusion_path),
     }
-
-
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, n_classes: int, desc: str = "eval") -> Dict:
-    model.eval()
-    y_true, y_pred, y_conf = [], [], []
-    with torch.no_grad():
-        for xb, yb in tqdm(loader, desc=desc, unit="batch", leave=False):
-            logits = model(xb.to(device))
-            probs = torch.softmax(logits, dim=1)
-            conf, pred = probs.max(dim=1)
-            y_conf.extend(conf.cpu().tolist())
-            y_pred.extend(pred.cpu().tolist())
-            y_true.extend(yb.tolist())
-    y_true_np = np.asarray(y_true, dtype=int)
-    y_pred_np = np.asarray(y_pred, dtype=int)
-    y_conf_np = np.asarray(y_conf, dtype=np.float32)
-    labels = np.arange(n_classes)
-    return {
-        "accuracy": float(accuracy_score(y_true_np, y_pred_np)) if len(y_true_np) else 0.0,
-        "confusion": confusion_matrix(y_true_np, y_pred_np, labels=labels),
-        "y_true": y_true_np,
-        "y_pred": y_pred_np,
-        "confidence": y_conf_np,
-    }
-
-
-def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]) -> pl.DataFrame:
-    label_ids = np.arange(len(labels))
-    precision, recall, f1, support = precision_recall_fscore_support(
-        y_true,
-        y_pred,
-        labels=label_ids,
-        zero_division=0,
-    )
-    return pl.DataFrame(
-        {
-            "class_id": label_ids,
-            "modulation": labels,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "support": support,
-        }
-    )
-
-
-def log_prf_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]) -> None:
-    label_ids = np.arange(len(labels))
-    for average in ("macro", "weighted"):
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            y_true,
-            y_pred,
-            labels=label_ids,
-            average=average,
-            zero_division=0,
-        )
-        mlflow.log_metric(f"{average}_precision", float(precision))
-        mlflow.log_metric(f"{average}_recall", float(recall))
-        mlflow.log_metric(f"{average}_f1", float(f1))
-
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        y_true,
-        y_pred,
-        labels=label_ids,
-        zero_division=0,
-    )
-
-
-def accuracy_by_snr(
-    metadata: pl.DataFrame,
-    test_idx: np.ndarray,
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    bin_width: float,
-) -> pl.DataFrame:
-    snr = metadata[test_idx]["snr_db"].to_numpy()
-    bins = np.floor(snr / bin_width) * bin_width
-    rows = []
-    for bin_start in sorted(np.unique(bins)):
-        mask = bins == bin_start
-        rows.append(
-            {
-                "snr_bin_db": float(bin_start),
-                "snr_bin_end_db": float(bin_start + bin_width),
-                "n": int(np.sum(mask)),
-                "accuracy": float(accuracy_score(y_true[mask], y_pred[mask])),
-            }
-        )
-    return pl.DataFrame(rows)
-
-
-def calibration_by_snr(
-    metadata: pl.DataFrame,
-    test_idx: np.ndarray,
-    y_true: np.ndarray,
-    y_conf: np.ndarray,
-    y_pred: np.ndarray,
-    bin_width: float,
-) -> pl.DataFrame:
-    snr = metadata[test_idx]["snr_db"].to_numpy()
-    bins = np.floor(snr / bin_width) * bin_width
-    rows = []
-    for bin_start in sorted(np.unique(bins)):
-        mask = bins == bin_start
-        n = int(mask.sum())
-        acc = float((y_pred[mask] == y_true[mask]).mean()) if n > 0 else float("nan")
-        mean_conf = float(y_conf[mask].mean()) if n > 0 else float("nan")
-        ece = abs(acc - mean_conf) if n > 0 else float("nan")
-        rows.append({
-            "snr_bin_db": float(bin_start),
-            "snr_bin_end_db": float(bin_start + bin_width),
-            "n": n,
-            "accuracy": acc,
-            "mean_confidence": mean_conf,
-            "ece": ece,
-        })
-    return pl.DataFrame(rows)
-
-
-def calibration_stats(
-    y_true: np.ndarray,
-    y_conf: np.ndarray,
-    y_pred: np.ndarray,
-    n_bins: int = 10,
-) -> Tuple[pl.DataFrame, float, float]:
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    rows = []
-    for i in range(n_bins):
-        lo, hi = float(bin_edges[i]), float(bin_edges[i + 1])
-        mask = (y_conf >= lo) & (y_conf <= hi if i == n_bins - 1 else y_conf < hi)
-        n = int(mask.sum())
-        rows.append({
-            "bin_lower": lo,
-            "bin_upper": hi,
-            "bin_midpoint": (lo + hi) / 2,
-            "accuracy": float((y_pred[mask] == y_true[mask]).mean()) if n > 0 else float("nan"),
-            "mean_confidence": float(y_conf[mask].mean()) if n > 0 else float("nan"),
-            "count": n,
-        })
-    df = pl.DataFrame(rows)
-    occupied = df.filter(pl.col("count") > 0)
-    n_total = max(len(y_true), 1)
-    weights = occupied["count"].to_numpy() / n_total
-    gaps = np.abs(occupied["accuracy"].to_numpy() - occupied["mean_confidence"].to_numpy())
-    ece = float(np.dot(weights, gaps))
-    mce = float(np.max(gaps)) if len(gaps) > 0 else 0.0
-    return df, ece, mce
-
-
-def write_summary(
-    path: Path,
-    run_id: str,
-    args: argparse.Namespace,
-    labels: List[str],
-    results: List[Dict],
-) -> None:
-    lines = [
-        "ModRec supervised baseline summary",
-        f"MLflow run id: {run_id}",
-        f"Training dataset: {args.dataset_dir}",
-        f"Validation dataset: {args.val_dataset_dir_effective}",
-        f"Test dataset: {args.test_dataset_dir_effective}",
-        f"Test source: {args.test_dataset_source}",
-        f"Models: {', '.join(result['model'] for result in results)}",
-        f"Labels: {', '.join(labels)}",
-        f"Train dataset examples available: {getattr(args, 'n_train_dataset_examples_available', 'unknown')}",
-        f"Train dataset examples used: {getattr(args, 'n_train_dataset_examples_used', 'unknown')}",
-        f"Test dataset examples available: {getattr(args, 'n_test_dataset_examples_available', 'unknown')}",
-        f"Test dataset examples used: {getattr(args, 'n_test_dataset_examples_used', 'unknown')}",
-        f"Split sizes: train={getattr(args, 'n_train_examples', 'unknown')}, val={getattr(args, 'n_val_examples', 'unknown')}, test={getattr(args, 'n_test_examples', 'unknown')}",
-        f"Epochs: {args.epochs}",
-        f"Batch size: {args.batch_size}",
-        "",
-    ]
-    for result in results:
-        lines.extend(
-            [
-                f"Model: {result['model']}",
-                f"Representation: {result['representation']}",
-                f"Best val accuracy: {result['best_val_accuracy']:.4f}",
-                f"Test accuracy: {result['test_accuracy']:.4f}",
-                f"ECE: {result['test_ece']:.4f}",
-                f"MCE: {result['test_mce']:.4f}",
-                "Accuracy versus SNR:",
-                result["accuracy_by_snr"].write_csv(),
-                "Confusion matrix counts:",
-                matrix_to_text(result["confusion"], labels),
-                "Per-class precision/recall/F1:",
-                result["per_class_metrics"].write_csv(),
-                f"Confusion plot: {result['confusion_path']}",
-                "",
-            ]
-        )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
-
-
-def matrix_to_text(matrix: np.ndarray, labels: List[str]) -> str:
-    header = ["true\\pred", *labels]
-    rows = ["\t".join(header)]
-    for label, values in zip(labels, matrix):
-        rows.append("\t".join([label, *[str(int(v)) for v in values]]))
-    return "\n".join(rows)
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train ModRec baselines.")
-    parser.add_argument("command", nargs="?", choices=("train", "sweep"), default="train")
-    parser.add_argument("--dataset-dir", default="data/awgn_snr0_30")
-    parser.add_argument(
-        "--test-dataset-dir",
-        default=None,
-        help="Optional external dataset for final test/OOD evaluation. Defaults to a held-out split of --dataset-dir.",
-    )
-    parser.add_argument(
-        "--models",
-        nargs="+",
-        default=["time_cnn", "resnet_1d"],
-        choices=MODEL_NAMES,
-    )
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--sample-frac", type=float, default=1.0)
-    parser.add_argument("--max-examples", type=int, default=None)
-    parser.add_argument("--train-frac", type=float, default=0.7)
-    parser.add_argument("--val-frac", type=float, default=0.15)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--channel-format", choices=CHANNEL_FORMATS, default="real_imag")
-    parser.add_argument("--remove-cfo", action="store_true")
-    parser.add_argument(
-        "--cfo-estimator",
-        choices=CFO_SWEEP_MODES,
-        default="lag_correlation",
-    )
-    parser.add_argument("--sweep-channel-formats", nargs="+", choices=CHANNEL_FORMATS, default=list(CHANNEL_FORMATS))
-    parser.add_argument("--sweep-cfo-estimators", nargs="+", choices=CFO_SWEEP_MODES, default=list(CFO_SWEEP_MODES))
-    parser.add_argument("--sweep-batch-sizes", nargs="+", type=int, default=None)
-    return parser
 
 
 def input_channels_for(representation: str, channel_format: str) -> int:
@@ -704,95 +473,3 @@ def run_config(
         write_summary(summary_path, run.info.run_id, args, labels, [result])
         mlflow.log_artifact(str(summary_path), artifact_path="summaries")
         print(summary_path)
-
-
-def main() -> None:
-    args = build_parser().parse_args()
-    validate_args(args)
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    train_signals, train_metadata = load_dataset(args.dataset_dir)
-    observed_labels = train_metadata["modulation"].unique().to_list()
-    labels = ordered_modulation_labels(observed_labels)
-    label_to_id = {label: idx for idx, label in enumerate(labels)}
-    id_to_label = {idx: label for label, idx in label_to_id.items()}
-
-    full_train_labels = train_metadata["modulation"].to_numpy()
-    train_dataset_idx = dataset_sample_indices(full_train_labels, args.sample_frac, args.max_examples, args.seed)
-    sampled_train_labels = full_train_labels[train_dataset_idx]
-
-    args.val_dataset_dir_effective = args.dataset_dir
-    if args.test_dataset_dir:
-        test_signals, test_metadata = load_dataset(args.test_dataset_dir)
-        validate_known_labels(test_metadata, labels, args.test_dataset_dir, "Test")
-        full_test_labels = test_metadata["modulation"].to_numpy()
-        test_idx = dataset_sample_indices(full_test_labels, args.sample_frac, args.max_examples, args.seed)
-        train_rel_idx, val_rel_idx = stratified_train_val_split(
-            sampled_train_labels,
-            args.train_frac,
-            args.val_frac,
-            args.seed,
-        )
-        splits = (train_dataset_idx[train_rel_idx], train_dataset_idx[val_rel_idx], test_idx)
-        args.test_dataset_dir_effective = args.test_dataset_dir
-        args.test_dataset_source = "external_dataset"
-    else:
-        test_signals, test_metadata = train_signals, train_metadata
-        relative_splits = stratified_split(sampled_train_labels, args.train_frac, args.val_frac, args.seed)
-        splits = tuple(train_dataset_idx[idx] for idx in relative_splits)
-        args.test_dataset_dir_effective = args.dataset_dir
-        args.test_dataset_source = "heldout_split"
-
-    val_signals, val_metadata = train_signals, train_metadata
-    args.n_train_dataset_examples_available = int(train_signals.shape[0])
-    args.n_train_dataset_examples_used = int(len(train_dataset_idx))
-    args.n_test_dataset_examples_available = int(test_signals.shape[0])
-    args.n_test_dataset_examples_used = int(len(splits[2]))
-    args.n_train_examples = int(len(splits[0]))
-    args.n_val_examples = int(len(splits[1]))
-    args.n_test_examples = int(len(splits[2]))
-    if args.test_dataset_dir:
-        print(
-            f"Using {args.n_train_dataset_examples_used}/{args.n_train_dataset_examples_available} training-source examples: "
-            f"train={args.n_train_examples}, val={args.n_val_examples}."
-        )
-        print(
-            f"Testing on external dataset {args.test_dataset_dir}: "
-            f"{args.n_test_dataset_examples_used}/{args.n_test_dataset_examples_available} examples."
-        )
-    else:
-        print(
-            f"Using {args.n_train_dataset_examples_used}/{args.n_train_dataset_examples_available} examples: "
-            f"train={args.n_train_examples}, val={args.n_val_examples}, test={args.n_test_examples}."
-        )
-
-    configure_mlflow()
-
-    configs = iter_sweep_args(args) if args.command == "sweep" else [args]
-    print(f"Running {len(configs)} configuration(s).")
-    for sweep_index, cfg in enumerate(configs, start=1):
-        for model_name in cfg.models:
-            print(
-                f"[{sweep_index}/{len(configs)}] {run_name_for(cfg, model_name)} "
-                f"epochs={cfg.epochs} lr={cfg.lr:g} seed={cfg.seed}"
-            )
-            run_config(
-                cfg,
-                model_name,
-                train_signals,
-                train_metadata,
-                val_signals,
-                val_metadata,
-                test_signals,
-                test_metadata,
-                label_to_id,
-                id_to_label,
-                labels,
-                splits,
-                sweep_index,
-                len(configs),
-            )
-
-
-if __name__ == "__main__":
-    main()

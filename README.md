@@ -36,18 +36,16 @@ signal features. Planned literature baselines include:
 
 ## Usage
 
-Create and activate a Python environment, then install the project dependencies:
+Install the project in editable mode with uv:
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
+uv sync
 ```
 
 Generate a synthetic dataset with the simulator:
 
 ```bash
-python simulator.py generate \
+uv run modreczoo-simulate generate \
   --output-dir data/awgn_sobol \
   --n-signals 1000 \
   --n-samples 32768 \
@@ -59,44 +57,12 @@ python simulator.py generate \
 Train the baseline models against that dataset:
 
 ```bash
-python train.py --dataset-dir data/awgn_sobol
+uv run modreczoo-train --dataset-dir data/awgn_sobol
 ```
-
-To profile the training bottleneck, sample the first 50 training batches:
-
-```bash
-python train.py --dataset-dir data/awgn_sobol --num-workers 4 --profile-batches 50
-```
-
-This prints and logs MLflow metrics for data wait time, host-to-device transfer
-time, GPU/CPU compute time, MLflow metric logging time, and artifact logging
-time. Compare `--num-workers 0`, `4`, and `8` to see whether DataLoader work is
-starving the GPU.
 
 Training defaults to a local `mlflow/` directory containing the SQLite store,
 artifacts, and staging files. Open the local MLflow UI with:
 
 ```bash
-mlflow ui --backend-store-uri sqlite:///mlflow/mlflow.db --host 127.0.0.1 --port 5000
-```
-
-On RunPod, attach a network volume at `/workspace`, clone the repo under
-`/workspace`, and expose port `5000` on the pod. Start the MLflow tracking
-server first so it owns artifact serving through the RunPod proxy:
-
-```bash
-mlflow server \
-  --backend-store-uri sqlite:////workspace/mlflow/mlflow.db \
-  --artifacts-destination /workspace/mlflow/artifacts \
-  --host 0.0.0.0 \
-  --port 5000 \
-  --allowed-hosts "*" \
-  --cors-allowed-origins "*"
-```
-
-In another shell on the same pod, train through that local HTTP server:
-
-```bash
-MLFLOW_TRACKING_URI=http://127.0.0.1:5000 \
-python train.py --mlflow-profile runpod --dataset-dir /workspace/data/awgn_sobol
+uv run mlflow ui --backend-store-uri sqlite:///mlflow/mlflow.db --host 127.0.0.1 --port 5000
 ```

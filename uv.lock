@@ -1855,9 +1855,8 @@ wheels = [
 [[package]]
 name = "modrec-zoo"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
-    { name = "jupyterlab" },
     { name = "matplotlib" },
     { name = "mlflow" },
     { name = "numpy" },
@@ -1871,15 +1870,12 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "ipykernel" },
     { name = "ipympl" },
-    { name = "ipython" },
     { name = "jupyterlab" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "jupyterlab", specifier = ">=4.5.7" },
     { name = "matplotlib" },
     { name = "mlflow" },
     { name = "numpy" },
@@ -1893,9 +1889,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "ipykernel" },
     { name = "ipympl" },
-    { name = "ipython" },
     { name = "jupyterlab" },
 ]
 

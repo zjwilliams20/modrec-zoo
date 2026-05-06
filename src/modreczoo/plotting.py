@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-from simulator import (
+from modreczoo.simulation import (
     MODEMS,
     apply_srrc_filter,
     ber_sweep,
