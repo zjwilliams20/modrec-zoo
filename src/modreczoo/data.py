@@ -15,13 +15,20 @@ METADATA_FILE = "metadata.parquet"
 README_MODULATION_ORDER = ("2PSK", "4PSK", "8PSK", "pi/4-DQPSK", "16QAM", "64QAM", "256QAM", "MSK")
 
 
-def save_dataset(output_dir: str, signals: np.ndarray, metadata: pl.DataFrame, extras: Optional[Dict[str, np.ndarray]] = None) -> None:
+def save_dataset(
+    output_dir: str,
+    signals: np.ndarray,
+    metadata: pl.DataFrame,
+    extras: Optional[Dict[str, np.ndarray]] = None,
+    compressed: bool = False,
+) -> None:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     arrays = {"signals": signals}
     if extras:
         arrays.update(extras)
-    np.savez_compressed(output / SIGNALS_FILE, **arrays)
+    save = np.savez_compressed if compressed else np.savez
+    save(output / SIGNALS_FILE, **arrays)
     metadata.write_parquet(output / METADATA_FILE)
 
 

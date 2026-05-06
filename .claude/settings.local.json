@@ -5,7 +5,8 @@
       "Bash(sqlite3 *)",
       "WebSearch",
       "WebFetch(domain:arxiv.org)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(uv add *)"
     ]
   }
 }

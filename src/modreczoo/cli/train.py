@@ -1,4 +1,4 @@
-import argparse
+from jsonargparse import ArgumentParser
 
 import numpy as np
 import torch
@@ -20,9 +20,10 @@ from modreczoo.training import (
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train ModRec baselines.")
-    parser.add_argument("command", nargs="?", choices=("train", "sweep"), default="train")
+def build_parser() -> ArgumentParser:
+    parser = ArgumentParser(description="Train ModRec baselines.")
+    parser.add_argument("--config", action="config")
+    parser.add_argument("--command", choices=("train", "sweep"), default="train")
     parser.add_argument("--dataset-dir", default="data/awgn_snr0_30")
     parser.add_argument(
         "--test-dataset-dir",
@@ -33,7 +34,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--models",
         nargs="+",
         default=["time_cnn", "resnet_1d", "dilated_cnn_1d"],
-        choices=MODEL_NAMES,
     )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=512)
@@ -46,21 +46,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-frac", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--channel-format", choices=CHANNEL_FORMATS, default="real_imag")
-    parser.add_argument("--remove-cfo", action="store_true")
-    parser.add_argument(
-        "--cfo-estimator",
-        choices=CFO_SWEEP_MODES,
-        default="lag_correlation",
-    )
-    parser.add_argument("--sweep-channel-formats", nargs="+", choices=CHANNEL_FORMATS, default=list(CHANNEL_FORMATS))
-    parser.add_argument("--sweep-cfo-estimators", nargs="+", choices=CFO_SWEEP_MODES, default=list(CFO_SWEEP_MODES))
+    parser.add_argument("--channel-format", default="real_imag")
+    parser.add_argument("--remove-cfo", type=bool, default=False)
+    parser.add_argument("--cfo-estimator", default="lag_correlation")
+    parser.add_argument("--sweep-channel-formats", nargs="+", default=list(CHANNEL_FORMATS))
+    parser.add_argument("--sweep-cfo-estimators", nargs="+", default=list(CFO_SWEEP_MODES))
     parser.add_argument("--sweep-batch-sizes", nargs="+", type=int, default=None)
     return parser
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    config_yaml = parser.dump(args)
     validate_args(args)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -144,6 +142,7 @@ def main() -> None:
                 splits,
                 sweep_index,
                 len(configs),
+                config_yaml=config_yaml,
             )
 
 

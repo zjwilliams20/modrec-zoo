@@ -3,7 +3,7 @@ import copy
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import mlflow
 import numpy as np
@@ -453,9 +453,12 @@ def run_config(
     splits: Tuple[np.ndarray, np.ndarray, np.ndarray],
     sweep_index: int,
     sweep_total: int,
+    config_yaml: Optional[str] = None,
 ) -> None:
     with mlflow.start_run(run_name=run_name_for(args, model_name)) as run:
         log_common_params(args, train_signals, test_signals, labels, sweep_index, sweep_total)
+        if config_yaml is not None:
+            mlflow.log_text(config_yaml, "config.yaml")
         result = train_one_model(
             args,
             model_name,

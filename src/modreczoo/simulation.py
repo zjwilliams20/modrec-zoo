@@ -1,5 +1,7 @@
+import functools
 import json
 import math
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -115,6 +117,13 @@ def rng_from_seed(seed: Optional[int]) -> np.random.Generator:
     return np.random.default_rng(seed)
 
 
+def signal_seed(dataset_seed: Optional[int], signal_id: int) -> Optional[int]:
+    if dataset_seed is None:
+        return None
+    seed_sequence = np.random.SeedSequence([int(dataset_seed), int(signal_id)])
+    return int(seed_sequence.generate_state(1, dtype=np.uint32)[0])
+
+
 def random_bits(rng: np.random.Generator, n_bits: int) -> np.ndarray:
     return rng.integers(0, 2, size=n_bits, dtype=np.uint8)
 
@@ -180,6 +189,7 @@ def modulate_msk(bits: np.ndarray) -> np.ndarray:
     return np.exp(1j * phase)
 
 
+@functools.lru_cache(maxsize=64)
 def srrc_filter(samples_per_symbol: int, beta: float, span_symbols: int = 8) -> np.ndarray:
     if samples_per_symbol < 1:
         raise ValueError("samples_per_symbol must be at least 1.")
@@ -427,6 +437,7 @@ def generate_dataset(
     n_signals: int,
     params: dict,
     debug: bool = False,
+    num_workers: int = 1,
 ) -> Tuple[np.ndarray, pl.DataFrame, Optional[Dict[str, np.ndarray]]]:
     rng = rng_from_seed(params.get("seed"))
     modulations = tuple(modulations)
@@ -434,10 +445,39 @@ def generate_dataset(
     metadata_rows: List[Dict] = []
     debug_arrays: Dict[str, List[np.ndarray]] = {"signal_clean": [], "signal_preshift": []}
     design = sample_parameter_design(n_signals, modulations, params, rng)
+    num_workers = max(1, int(num_workers))
 
-    for i in tqdm(range(n_signals), desc="Generating signals"):
-        row = design[i]
-        signal_data = generate_signal(
+    if num_workers == 1:
+        results = (_generate_dataset_signal(i, design[i], params, debug, rng) for i in range(n_signals))
+    else:
+        tasks = ((i, design[i], params, debug) for i in range(n_signals))
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            results = executor.map(_generate_dataset_signal_worker, tasks)
+
+    for i, signal_data in tqdm(results, total=n_signals, desc="Generating signals"):
+        dataset[i] = signal_data["signal"]
+        metadata_rows.append(signal_data["metadata"])
+        if debug:
+            debug_arrays["signal_clean"].append(pad_or_trim(signal_data["signal_clean"], params["n_samples"]).astype(np.complex64))
+            debug_arrays["signal_preshift"].append(pad_or_trim(signal_data["signal_preshift"], params["n_samples"]).astype(np.complex64))
+
+    metadata_rows.sort(key=lambda row: row["signal_id"])
+    metadata = pl.DataFrame(metadata_rows)
+    extras = {key: np.stack(value) for key, value in debug_arrays.items()} if debug else None
+    return dataset, metadata, extras
+
+
+def _generate_dataset_signal(
+    signal_id: int,
+    row: Dict,
+    params: dict,
+    debug: bool,
+    rng: Optional[np.random.Generator] = None,
+) -> Tuple[int, Dict]:
+    seed = params.get("seed")
+    signal_rng = rng if seed is None and rng is not None else rng_from_seed(signal_seed(seed, signal_id))
+    try:
+        return signal_id, generate_signal(
             modulation=row["modulation"],
             snr_db=row["snr_db"],
             cfo=row["cfo"],
@@ -446,24 +486,22 @@ def generate_dataset(
             ebw=row["ebw"],
             cpo=row["cpo"],
             n_samples=int(params["n_samples"]),
-            signal_id=i,
+            signal_id=signal_id,
             channel=params["channel"],
             rician_k_db=row["rician_k_db"],
             n_taps=row["n_taps"],
             delay_spread_symbols=row["delay_spread_symbols"],
             delay_decay_symbols=row["delay_decay_symbols"],
-            rng=rng,
+            rng=signal_rng,
             debug=debug,
         )
-        dataset[i] = signal_data["signal"]
-        metadata_rows.append(signal_data["metadata"])
-        if debug:
-            debug_arrays["signal_clean"].append(pad_or_trim(signal_data["signal_clean"], params["n_samples"]).astype(np.complex64))
-            debug_arrays["signal_preshift"].append(pad_or_trim(signal_data["signal_preshift"], params["n_samples"]).astype(np.complex64))
+    except Exception as exc:
+        raise RuntimeError(f"Failed to generate signal_id={signal_id}") from exc
 
-    metadata = pl.DataFrame(metadata_rows)
-    extras = {key: np.stack(value) for key, value in debug_arrays.items()} if debug else None
-    return dataset, metadata, extras
+
+def _generate_dataset_signal_worker(args: Tuple[int, Dict, dict, bool]) -> Tuple[int, Dict]:
+    signal_id, row, params, debug = args
+    return _generate_dataset_signal(signal_id, row, params, debug)
 
 
 def sample_parameter_design(

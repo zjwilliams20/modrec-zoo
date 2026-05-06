@@ -18,6 +18,7 @@ dependencies = [
     "mlflow",
     "scikit-learn",
     "nvidia-ml-py>=13.595.45",
+    "jsonargparse",
 ]
 
 [project.scripts]
@@ -31,4 +32,9 @@ packages = ["src/modreczoo"]
 dev = [
     "jupyterlab",
     "ipympl",
+    "jupyter-collaboration>=4.3.0",
+    "jupyter-mcp-tools>=0.1.6",
+    "ipykernel>=7.2.0",
+    "pycrdt>=0.12.50",
+    "jupyter-mcp-server>=1.0.2",
 ]
