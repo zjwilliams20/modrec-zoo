@@ -1,4 +1,6 @@
 from jsonargparse import ArgumentParser
+from typing import List
+import argparse
 
 import numpy as np
 import torch
@@ -24,6 +26,7 @@ def build_parser() -> ArgumentParser:
     parser = ArgumentParser(description="Train ModRec baselines.")
     parser.add_argument("--config", action="config")
     parser.add_argument("--command", choices=("train", "sweep"), default="train")
+    parser.add_argument("--experiment-name", default="modrec", help="MLflow experiment name.")
     parser.add_argument("--run-name", default=None, help="Override the auto-generated MLflow run name.")
     parser.add_argument("--dataset-dir", default="data/awgn_snr0_30")
     parser.add_argument(
@@ -50,33 +53,61 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--channel-format", default="real_imag")
     parser.add_argument("--remove-cfo", type=bool, default=False)
     parser.add_argument("--cfo-estimator", default="lag_correlation")
-    parser.add_argument("--spectrogram-size", type=int, default=64)
-    parser.add_argument("--spectrogram-freq-bins", type=int, default=None)
-    parser.add_argument("--spectrogram-time-bins", type=int, default=None)
+    parser.add_argument("--spectrogram-freq-bins", type=int, default=64)
+    parser.add_argument("--spectrogram-time-bins", type=int, default=64)
     parser.add_argument("--spectrogram-nperseg", type=int, default=64)
     parser.add_argument("--spectrogram-noverlap", type=int, default=48)
-    parser.add_argument("--spectrogram-window", default="hann")
-    parser.add_argument("--spectrogram-window-beta", type=float, default=0.0)
+    parser.add_argument("--spectrogram-window", default="hann", help="Window name, or 'kaiser:14' to set kaiser beta.")
     parser.add_argument("--spectrogram-base-channels", type=int, default=24)
-    parser.add_argument("--spectrogram-kernel-size", type=int, default=3)
-    parser.add_argument("--spectrogram-freq-kernel", type=int, default=5)
+    parser.add_argument("--spectrogram-freq-kernel", type=int, default=7)
     parser.add_argument("--spectrogram-time-kernel", type=int, default=3)
-    parser.add_argument("--spectrogram-blocks-per-stage", nargs=4, type=int, default=[2, 2, 2, 2])
+    parser.add_argument("--transformer-patch-size", type=int, default=32    )
+    parser.add_argument("--transformer-d-model", type=int, default=128)
+    parser.add_argument("--transformer-n-heads", type=int, default=4)
+    parser.add_argument("--transformer-n-layers", type=int, default=4)
     parser.add_argument("--sweep-channel-formats", nargs="+", default=list(CHANNEL_FORMATS))
-    parser.add_argument("--sweep-cfo-estimators", nargs="+", default=list(CFO_SWEEP_MODES))
+    parser.add_argument("--sweep-cfo-estimators", nargs="+", default=["lag_correlation"])
     parser.add_argument("--sweep-batch-sizes", nargs="+", type=int, default=None)
-    parser.add_argument("--sweep-spectrogram-sizes", nargs="+", type=int, default=None)
     parser.add_argument("--sweep-spectrogram-freq-bins", nargs="+", type=int, default=None)
     parser.add_argument("--sweep-spectrogram-time-bins", nargs="+", type=int, default=None)
-    parser.add_argument("--sweep-spectrogram-npersegs", nargs="+", type=int, default=None)
-    parser.add_argument("--sweep-spectrogram-noverlaps", nargs="+", type=int, default=None)
-    parser.add_argument("--sweep-spectrogram-windows", nargs="+", default=None)
-    parser.add_argument("--sweep-spectrogram-window-betas", nargs="+", type=float, default=None)
     parser.add_argument("--sweep-spectrogram-base-channels", nargs="+", type=int, default=None)
-    parser.add_argument("--sweep-spectrogram-kernel-sizes", nargs="+", type=int, default=None)
     parser.add_argument("--sweep-spectrogram-freq-kernels", nargs="+", type=int, default=None)
     parser.add_argument("--sweep-spectrogram-time-kernels", nargs="+", type=int, default=None)
     return parser
+
+
+def _print_sweep_table(configs: List[argparse.Namespace]) -> None:
+    from modreczoo.training import run_name_for
+
+    _COLS = [
+        ("run_name",               lambda c: run_name_for(c, c.models[0])),
+        ("model",                  lambda c: c.models[0]),
+        ("channel_format",         lambda c: c.channel_format),
+        ("batch_size",             lambda c: str(c.batch_size)),
+        ("cfo",                    lambda c: c.cfo_estimator if c.remove_cfo else "raw"),
+        ("freq_bins",              lambda c: str(c.spectrogram_freq_bins)),
+        ("time_bins",              lambda c: str(c.spectrogram_time_bins)),
+        ("base_ch",                lambda c: str(c.spectrogram_base_channels)),
+        ("freq_k",                 lambda c: str(c.spectrogram_freq_kernel)),
+        ("time_k",                 lambda c: str(c.spectrogram_time_kernel)),
+    ]
+
+    rows = [[fn(c) for _, fn in _COLS] for c in configs]
+    headers = [h for h, _ in _COLS]
+
+    # Drop columns that are identical across all configs.
+    keep = [i for i, col in enumerate(zip(*rows)) if len(set(col)) > 1]
+    headers = [headers[i] for i in keep]
+    rows = [[row[i] for i in keep] for row in rows]
+
+    widths = [max(len(h), max(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    sep = "  ".join("-" * w for w in widths)
+    header_line = "  ".join(h.ljust(w) for h, w in zip(headers, widths))
+    print(header_line)
+    print(sep)
+    for row in rows:
+        print("  ".join(v.ljust(w) for v, w in zip(row, widths)))
+    print()
 
 
 def main() -> None:
@@ -141,10 +172,12 @@ def main() -> None:
             f"train={args.n_train_examples}, val={args.n_val_examples}, test={args.n_test_examples}."
         )
 
-    configure_mlflow()
+    configure_mlflow(args.experiment_name)
 
     configs = iter_sweep_args(args) if args.command == "sweep" else [args]
     print(f"Running {len(configs)} configuration(s).")
+    if args.command == "sweep":
+        _print_sweep_table(configs)
     for sweep_index, cfg in enumerate(configs, start=1):
         for model_name in cfg.models:
             print(

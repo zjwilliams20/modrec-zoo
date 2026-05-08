@@ -25,13 +25,17 @@ from modreczoo.evaluation import (
     per_class_metrics,
     write_summary,
 )
-from modreczoo.models import make_model, representation_for_model
+from modreczoo.models import make_model, representation_for_model, required_channel_format_for
 
 
 CFO_ESTIMATORS = ("lag_correlation", "phase_slope", "spectral_centroid")
 CFO_SWEEP_MODES = ("raw", *CFO_ESTIMATORS)
-CHANNEL_FORMATS = ("real_imag", "mag", "mag_phase", "mag_inst_freq")
-MODEL_NAMES = ("time_cnn", "frequency_cnn", "spectrogram_cnn", "spectrogram_resnet", "feature_mlp", "resnet_1d", "complex_cnn_1d", "dilated_cnn_1d")
+CHANNEL_FORMATS = ("real_imag", "mag", "mag_phase", "mag_inst_freq", "differential_complex", "apf")
+MODEL_NAMES = (
+    "time_cnn", "frequency_cnn", "spectrogram_cnn", "spectrogram_resnet",
+    "feature_mlp", "resnet_1d", "complex_cnn_1d", "dilated_cnn_1d",
+    "patch_transformer_1d", "multiscale_pyramid_1d", "diff_resnet_1d", "apf_net_1d",
+)
 SNR_BIN_WIDTH = 4.0
 MLFLOW_DIR = Path("mlflow").absolute()
 MLFLOW_DB = MLFLOW_DIR / "mlflow.db"
@@ -144,82 +148,41 @@ def train_one_model(
 ) -> Dict:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     representation = representation_for_model(model_name)
+    channel_format = required_channel_format_for(model_name) or args.channel_format
     model, representation = make_model(
         model_name,
         len(label_to_id),
         train_signals.shape[1],
-        in_channels=input_channels_for(representation, args.channel_format),
+        in_channels=input_channels_for(representation, channel_format),
         spectrogram_base_channels=args.spectrogram_base_channels,
-        spectrogram_kernel_size=args.spectrogram_kernel_size,
         spectrogram_freq_kernel=args.spectrogram_freq_kernel,
         spectrogram_time_kernel=args.spectrogram_time_kernel,
-        spectrogram_blocks_per_stage=args.spectrogram_blocks_per_stage,
+        transformer_patch_size=args.transformer_patch_size,
+        transformer_d_model=args.transformer_d_model,
+        transformer_n_heads=args.transformer_n_heads,
+        transformer_n_layers=args.transformer_n_layers,
     )
     model.to(device)
     mlflow.log_param("model_name", model_name)
     mlflow.log_param("representation", representation)
 
     train_idx, val_idx, test_idx = splits
-    train_loader = get_data_loader(
-        train_signals,
-        train_metadata,
-        train_idx,
-        label_to_id,
+    loader_kwargs = dict(
         model_name=model_name,
-        channel_format=args.channel_format,
+        channel_format=channel_format,
         remove_cfo=args.remove_cfo,
         cfo_estimator=args.cfo_estimator,
         batch_size=args.batch_size,
-        shuffle=True,
         num_workers=args.num_workers,
-        spectrogram_size=args.spectrogram_size,
         spectrogram_freq_bins=args.spectrogram_freq_bins,
         spectrogram_time_bins=args.spectrogram_time_bins,
         spectrogram_nperseg=args.spectrogram_nperseg,
         spectrogram_noverlap=args.spectrogram_noverlap,
         spectrogram_window=args.spectrogram_window,
-        spectrogram_window_beta=args.spectrogram_window_beta,
     )
-    val_loader = get_data_loader(
-        val_signals,
-        val_metadata,
-        val_idx,
-        label_to_id,
-        model_name=model_name,
-        channel_format=args.channel_format,
-        remove_cfo=args.remove_cfo,
-        cfo_estimator=args.cfo_estimator,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        spectrogram_size=args.spectrogram_size,
-        spectrogram_freq_bins=args.spectrogram_freq_bins,
-        spectrogram_time_bins=args.spectrogram_time_bins,
-        spectrogram_nperseg=args.spectrogram_nperseg,
-        spectrogram_noverlap=args.spectrogram_noverlap,
-        spectrogram_window=args.spectrogram_window,
-        spectrogram_window_beta=args.spectrogram_window_beta,
-    )
-    test_loader = get_data_loader(
-        test_signals,
-        test_metadata,
-        test_idx,
-        label_to_id,
-        model_name=model_name,
-        channel_format=args.channel_format,
-        remove_cfo=args.remove_cfo,
-        cfo_estimator=args.cfo_estimator,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        spectrogram_size=args.spectrogram_size,
-        spectrogram_freq_bins=args.spectrogram_freq_bins,
-        spectrogram_time_bins=args.spectrogram_time_bins,
-        spectrogram_nperseg=args.spectrogram_nperseg,
-        spectrogram_noverlap=args.spectrogram_noverlap,
-        spectrogram_window=args.spectrogram_window,
-        spectrogram_window_beta=args.spectrogram_window_beta,
-    )
+    train_loader = get_data_loader(train_signals, train_metadata, train_idx, label_to_id, shuffle=True, **loader_kwargs)
+    val_loader = get_data_loader(val_signals, val_metadata, val_idx, label_to_id, shuffle=False, **loader_kwargs)
+    test_loader = get_data_loader(test_signals, test_metadata, test_idx, label_to_id, shuffle=False, **loader_kwargs)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best_state = None
@@ -272,6 +235,7 @@ def train_one_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
+    mlflow.pytorch.log_model(model, artifact_path="model", registered_model_name=model_name)
     test_metrics = evaluate(model, test_loader, device, len(label_to_id), desc="test")
     accuracy_bootstrap = bootstrap_accuracy(test_metrics["y_true"], test_metrics["y_pred"], seed=args.seed)
     snr_summary = accuracy_by_snr(test_metadata, test_idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
@@ -288,8 +252,13 @@ def train_one_model(
         plot_accuracy_by_snr,
         plot_calibration_by_snr,
         plot_confusion_matrix,
+        plot_input_examples,
         plot_reliability_diagram,
     )
+
+    input_examples_path = artifact_dir / "input_examples.png"
+    plot_input_examples(train_loader, id_to_label, representation, channel_format, input_examples_path)
+    mlflow.log_artifact(str(input_examples_path), artifact_path="plots")
 
     plot_confusion_matrix(test_metrics["confusion"], labels_ordered, confusion_path, model_name)
     plot_accuracy_by_snr(snr_summary, snr_plot_path, model_name)
@@ -345,19 +314,21 @@ def train_one_model(
 def input_channels_for(representation: str, channel_format: str) -> int:
     if representation == "features":
         return 1
+    if channel_format == "apf":
+        return 4
     if channel_format == "mag":
         return 1
     return 2
 
 
-def configure_mlflow() -> None:
+def configure_mlflow(experiment_name: str = EXPERIMENT_NAME) -> None:
     MLFLOW_ARTIFACTS.mkdir(parents=True, exist_ok=True)
     MLFLOW_STAGING.mkdir(parents=True, exist_ok=True)
     mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_DB.absolute()}")
     client = MlflowClient()
-    experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
+    experiment = client.get_experiment_by_name(experiment_name)
     if experiment is None:
-        client.create_experiment(EXPERIMENT_NAME, artifact_location=MLFLOW_ARTIFACTS.as_uri())
+        client.create_experiment(experiment_name, artifact_location=MLFLOW_ARTIFACTS.as_uri())
     else:
         desired = MLFLOW_ARTIFACTS.absolute().as_uri()
         if getattr(experiment, "artifact_location", None) != desired:
@@ -367,7 +338,7 @@ def configure_mlflow() -> None:
                     "update experiments set artifact_location=? where experiment_id=?",
                     (desired, experiment.experiment_id),
                 )
-    mlflow.set_experiment(EXPERIMENT_NAME)
+    mlflow.set_experiment(experiment_name)
 
 
 def cfo_label(args: argparse.Namespace) -> str:
@@ -380,14 +351,12 @@ _SWEEP_PARAM_FORMATTERS: List[Tuple[str, Any]] = [
     ("channel_format",           lambda a: a.channel_format),
     ("batch_size",               lambda a: f"bs{a.batch_size}"),
     ("cfo_estimator",            lambda a: cfo_label(a)),
-    ("spectrogram_freq_bins",    lambda a: f"f{a.spectrogram_freq_bins or a.spectrogram_size}"),
-    ("spectrogram_time_bins",    lambda a: f"t{a.spectrogram_time_bins or a.spectrogram_size}"),
+    ("spectrogram_freq_bins",    lambda a: f"f{a.spectrogram_freq_bins}"),
+    ("spectrogram_time_bins",    lambda a: f"t{a.spectrogram_time_bins}"),
     ("spectrogram_nperseg",      lambda a: f"n{a.spectrogram_nperseg}"),
     ("spectrogram_noverlap",     lambda a: f"o{a.spectrogram_noverlap}"),
     ("spectrogram_window",       lambda a: a.spectrogram_window),
-    ("spectrogram_window_beta",  lambda a: f"b{a.spectrogram_window_beta:g}"),
     ("spectrogram_base_channels",lambda a: f"c{a.spectrogram_base_channels}"),
-    ("spectrogram_kernel_size",  lambda a: f"k{a.spectrogram_kernel_size}"),
     ("spectrogram_freq_kernel",  lambda a: f"fk{a.spectrogram_freq_kernel}"),
     ("spectrogram_time_kernel",  lambda a: f"tk{a.spectrogram_time_kernel}"),
 ]
@@ -396,15 +365,9 @@ _SWEEP_ATTR_TO_PARAM = {
     "sweep_channel_formats":           "channel_format",
     "sweep_batch_sizes":               "batch_size",
     "sweep_cfo_estimators":            "cfo_estimator",
-    "sweep_spectrogram_sizes":         "spectrogram_size",
     "sweep_spectrogram_freq_bins":     "spectrogram_freq_bins",
     "sweep_spectrogram_time_bins":     "spectrogram_time_bins",
-    "sweep_spectrogram_npersegs":      "spectrogram_nperseg",
-    "sweep_spectrogram_noverlaps":     "spectrogram_noverlap",
-    "sweep_spectrogram_windows":       "spectrogram_window",
-    "sweep_spectrogram_window_betas":  "spectrogram_window_beta",
     "sweep_spectrogram_base_channels": "spectrogram_base_channels",
-    "sweep_spectrogram_kernel_sizes":  "spectrogram_kernel_size",
     "sweep_spectrogram_freq_kernels":  "spectrogram_freq_kernel",
     "sweep_spectrogram_time_kernels":  "spectrogram_time_kernel",
 }
@@ -435,9 +398,7 @@ def run_name_for(args: argparse.Namespace, model_name: str) -> str:
 
     name = f"{model_name}-{args.channel_format}-bs{args.batch_size}-{cfo_label(args)}"
     if representation_for_model(model_name) == "spectrogram":
-        freq_bins = args.spectrogram_freq_bins or args.spectrogram_size
-        time_bins = args.spectrogram_time_bins or args.spectrogram_size
-        name += f"-f{freq_bins}-t{time_bins}"
+        name += f"-f{args.spectrogram_freq_bins}-t{args.spectrogram_time_bins}"
     return name
 
 
@@ -448,90 +409,43 @@ def effective_cfo_estimator(args: argparse.Namespace) -> str:
 def iter_sweep_args(args: argparse.Namespace) -> List[argparse.Namespace]:
     batch_sizes = args.sweep_batch_sizes if args.sweep_batch_sizes else [args.batch_size]
     cfo_modes = list(args.sweep_cfo_estimators)
-    spectrogram_sizes = args.sweep_spectrogram_sizes if args.sweep_spectrogram_sizes else [args.spectrogram_size]
-    spectrogram_freq_bins = (
-        args.sweep_spectrogram_freq_bins if args.sweep_spectrogram_freq_bins else [args.spectrogram_freq_bins]
-    )
-    spectrogram_time_bins = (
-        args.sweep_spectrogram_time_bins if args.sweep_spectrogram_time_bins else [args.spectrogram_time_bins]
-    )
-    spectrogram_npersegs = args.sweep_spectrogram_npersegs if args.sweep_spectrogram_npersegs else [args.spectrogram_nperseg]
-    spectrogram_noverlaps = args.sweep_spectrogram_noverlaps if args.sweep_spectrogram_noverlaps else [args.spectrogram_noverlap]
-    spectrogram_windows = args.sweep_spectrogram_windows if args.sweep_spectrogram_windows else [args.spectrogram_window]
-    spectrogram_window_betas = (
-        args.sweep_spectrogram_window_betas if args.sweep_spectrogram_window_betas else [args.spectrogram_window_beta]
-    )
-    spectrogram_base_channels = (
-        args.sweep_spectrogram_base_channels if args.sweep_spectrogram_base_channels else [args.spectrogram_base_channels]
-    )
-    spectrogram_kernel_sizes = (
-        args.sweep_spectrogram_kernel_sizes if args.sweep_spectrogram_kernel_sizes else [args.spectrogram_kernel_size]
-    )
-    spectrogram_freq_kernels = (
-        args.sweep_spectrogram_freq_kernels if args.sweep_spectrogram_freq_kernels else [args.spectrogram_freq_kernel]
-    )
-    spectrogram_time_kernels = (
-        args.sweep_spectrogram_time_kernels if args.sweep_spectrogram_time_kernels else [args.spectrogram_time_kernel]
-    )
+    spectrogram_freq_bins = args.sweep_spectrogram_freq_bins if args.sweep_spectrogram_freq_bins else [args.spectrogram_freq_bins]
+    spectrogram_time_bins = args.sweep_spectrogram_time_bins if args.sweep_spectrogram_time_bins else [args.spectrogram_time_bins]
+    spectrogram_base_channels = args.sweep_spectrogram_base_channels if args.sweep_spectrogram_base_channels else [args.spectrogram_base_channels]
+    spectrogram_freq_kernels = args.sweep_spectrogram_freq_kernels if args.sweep_spectrogram_freq_kernels else [args.spectrogram_freq_kernel]
+    spectrogram_time_kernels = args.sweep_spectrogram_time_kernels if args.sweep_spectrogram_time_kernels else [args.spectrogram_time_kernel]
 
     varying = _swept_params(args)
     configs = []
     seen = set()
     for model_name in args.models:
-        for channel_format in args.sweep_channel_formats:
+        forced_format = required_channel_format_for(model_name)
+        channel_formats = [forced_format] if forced_format else args.sweep_channel_formats
+        for channel_format in channel_formats:
             for batch_size in batch_sizes:
                 for cfo_mode in cfo_modes:
-                    for spectrogram_size in spectrogram_sizes:
-                        for freq_bins in spectrogram_freq_bins:
-                            for time_bins in spectrogram_time_bins:
-                                for spectrogram_nperseg in spectrogram_npersegs:
-                                    for spectrogram_noverlap in spectrogram_noverlaps:
-                                        for spectrogram_window in spectrogram_windows:
-                                            for spectrogram_window_beta in spectrogram_window_betas:
-                                                for base_channels in spectrogram_base_channels:
-                                                    for kernel_size in spectrogram_kernel_sizes:
-                                                        for freq_kernel in spectrogram_freq_kernels:
-                                                            for time_kernel in spectrogram_time_kernels:
-                                                                remove_cfo = cfo_mode != "raw"
-                                                                key = (
-                                                                    model_name,
-                                                                    channel_format,
-                                                                    batch_size,
-                                                                    cfo_mode,
-                                                                    spectrogram_size,
-                                                                    freq_bins,
-                                                                    time_bins,
-                                                                    spectrogram_nperseg,
-                                                                    spectrogram_noverlap,
-                                                                    spectrogram_window,
-                                                                    spectrogram_window_beta,
-                                                                    base_channels,
-                                                                    kernel_size,
-                                                                    freq_kernel,
-                                                                    time_kernel,
-                                                                )
-                                                                if key in seen:
-                                                                    continue
-                                                                seen.add(key)
-                                                                cfg = copy.copy(args)
-                                                                cfg.models = [model_name]
-                                                                cfg.channel_format = channel_format
-                                                                cfg.batch_size = batch_size
-                                                                cfg.remove_cfo = remove_cfo
-                                                                cfg.cfo_estimator = cfo_mode
-                                                                cfg.spectrogram_size = spectrogram_size
-                                                                cfg.spectrogram_freq_bins = freq_bins
-                                                                cfg.spectrogram_time_bins = time_bins
-                                                                cfg.spectrogram_nperseg = spectrogram_nperseg
-                                                                cfg.spectrogram_noverlap = spectrogram_noverlap
-                                                                cfg.spectrogram_window = spectrogram_window
-                                                                cfg.spectrogram_window_beta = spectrogram_window_beta
-                                                                cfg.spectrogram_base_channels = base_channels
-                                                                cfg.spectrogram_kernel_size = kernel_size
-                                                                cfg.spectrogram_freq_kernel = freq_kernel
-                                                                cfg.spectrogram_time_kernel = time_kernel
-                                                                cfg._sweep_varying_params = varying
-                                                                configs.append(cfg)
+                    for freq_bins in spectrogram_freq_bins:
+                        for time_bins in spectrogram_time_bins:
+                            for base_channels in spectrogram_base_channels:
+                                for freq_kernel in spectrogram_freq_kernels:
+                                    for time_kernel in spectrogram_time_kernels:
+                                        key = (model_name, channel_format, batch_size, cfo_mode, freq_bins, time_bins, base_channels, freq_kernel, time_kernel)
+                                        if key in seen:
+                                            continue
+                                        seen.add(key)
+                                        cfg = copy.copy(args)
+                                        cfg.models = [model_name]
+                                        cfg.channel_format = channel_format
+                                        cfg.batch_size = batch_size
+                                        cfg.remove_cfo = cfo_mode != "raw"
+                                        cfg.cfo_estimator = cfo_mode
+                                        cfg.spectrogram_freq_bins = freq_bins
+                                        cfg.spectrogram_time_bins = time_bins
+                                        cfg.spectrogram_base_channels = base_channels
+                                        cfg.spectrogram_freq_kernel = freq_kernel
+                                        cfg.spectrogram_time_kernel = time_kernel
+                                        cfg._sweep_varying_params = varying
+                                        configs.append(cfg)
     return configs
 
 
@@ -544,18 +458,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Expected at least one CFO sweep mode.")
     if args.spectrogram_noverlap >= args.spectrogram_nperseg:
         raise ValueError("--spectrogram-noverlap must be less than --spectrogram-nperseg.")
-    if (args.spectrogram_freq_bins or args.spectrogram_size) < args.spectrogram_nperseg:
-        raise ValueError("--spectrogram-freq-bins, or --spectrogram-size when unset, must be at least --spectrogram-nperseg.")
-    if (args.spectrogram_time_bins or args.spectrogram_size) < 1:
-        raise ValueError("--spectrogram-time-bins, or --spectrogram-size when unset, must be positive.")
-    if args.spectrogram_kernel_size % 2 == 0 or args.spectrogram_kernel_size < 1:
-        raise ValueError("--spectrogram-kernel-size must be a positive odd integer.")
+    if args.spectrogram_freq_bins < args.spectrogram_nperseg:
+        raise ValueError("--spectrogram-freq-bins must be at least --spectrogram-nperseg.")
+    if args.spectrogram_time_bins < 1:
+        raise ValueError("--spectrogram-time-bins must be positive.")
     if args.spectrogram_freq_kernel % 2 == 0 or args.spectrogram_freq_kernel < 1:
         raise ValueError("--spectrogram-freq-kernel must be a positive odd integer.")
     if args.spectrogram_time_kernel % 2 == 0 or args.spectrogram_time_kernel < 1:
         raise ValueError("--spectrogram-time-kernel must be a positive odd integer.")
-    if len(args.spectrogram_blocks_per_stage) != 4 or any(b < 1 for b in args.spectrogram_blocks_per_stage):
-        raise ValueError("--spectrogram-blocks-per-stage must be exactly 4 positive integers.")
 
 
 def validate_known_labels(metadata: pl.DataFrame, labels: List[str], dataset_dir: str, role: str) -> None:
@@ -569,6 +479,7 @@ def validate_known_labels(metadata: pl.DataFrame, labels: List[str], dataset_dir
 
 def log_common_params(
     args: argparse.Namespace,
+    model_name: str,
     train_signals: np.ndarray,
     test_signals: np.ndarray,
     labels: List[str],
@@ -602,21 +513,21 @@ def log_common_params(
             "n_train_examples": args.n_train_examples,
             "n_val_examples": args.n_val_examples,
             "n_test_examples": args.n_test_examples,
-            "channel_format": args.channel_format,
+            "channel_format": required_channel_format_for(model_name) or args.channel_format,
             "remove_cfo": args.remove_cfo,
             "cfo_estimator": effective_cfo_estimator(args),
-            "spectrogram_size": args.spectrogram_size,
-            "spectrogram_freq_bins": args.spectrogram_freq_bins or args.spectrogram_size,
-            "spectrogram_time_bins": args.spectrogram_time_bins or args.spectrogram_size,
+            "spectrogram_freq_bins": args.spectrogram_freq_bins,
+            "spectrogram_time_bins": args.spectrogram_time_bins,
             "spectrogram_nperseg": args.spectrogram_nperseg,
             "spectrogram_noverlap": args.spectrogram_noverlap,
             "spectrogram_window": args.spectrogram_window,
-            "spectrogram_window_beta": args.spectrogram_window_beta,
             "spectrogram_base_channels": args.spectrogram_base_channels,
-            "spectrogram_kernel_size": args.spectrogram_kernel_size,
             "spectrogram_freq_kernel": args.spectrogram_freq_kernel,
             "spectrogram_time_kernel": args.spectrogram_time_kernel,
-            "spectrogram_blocks_per_stage": json.dumps(list(args.spectrogram_blocks_per_stage)),
+            "transformer_patch_size": args.transformer_patch_size,
+            "transformer_d_model": args.transformer_d_model,
+            "transformer_n_heads": args.transformer_n_heads,
+            "transformer_n_layers": args.transformer_n_layers,
             "labels": json.dumps(labels),
             "sweep_index": sweep_index,
             "sweep_total": sweep_total,
@@ -642,7 +553,7 @@ def run_config(
     config_yaml: Optional[str] = None,
 ) -> None:
     with mlflow.start_run(run_name=run_name_for(args, model_name)) as run:
-        log_common_params(args, train_signals, test_signals, labels, sweep_index, sweep_total)
+        log_common_params(args, model_name, train_signals, test_signals, labels, sweep_index, sweep_total)
         if config_yaml is not None:
             mlflow.log_text(config_yaml, "config.yaml")
         result = train_one_model(

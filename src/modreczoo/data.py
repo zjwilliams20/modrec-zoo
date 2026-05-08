@@ -51,13 +51,11 @@ class ModrecDataset(Dataset):
         channel_format: str,
         remove_cfo: bool,
         cfo_estimator: str,
-        spectrogram_size: int = 64,
-        spectrogram_freq_bins: int | None = None,
-        spectrogram_time_bins: int | None = None,
+        spectrogram_freq_bins: int = 64,
+        spectrogram_time_bins: int = 64,
         spectrogram_nperseg: int = 64,
         spectrogram_noverlap: int = 48,
         spectrogram_window: str = "hann",
-        spectrogram_window_beta: float = 0.0,
     ) -> None:
         self.signals = signals
         self.metadata = metadata
@@ -67,13 +65,11 @@ class ModrecDataset(Dataset):
         self.channel_format = channel_format
         self.remove_cfo = remove_cfo
         self.cfo_estimator = cfo_estimator
-        self.spectrogram_size = spectrogram_size
         self.spectrogram_freq_bins = spectrogram_freq_bins
         self.spectrogram_time_bins = spectrogram_time_bins
         self.spectrogram_nperseg = spectrogram_nperseg
         self.spectrogram_noverlap = spectrogram_noverlap
         self.spectrogram_window = spectrogram_window
-        self.spectrogram_window_beta = spectrogram_window_beta
         self.labels = metadata["modulation"].to_numpy()
 
     def __len__(self) -> int:
@@ -94,13 +90,11 @@ class ModrecDataset(Dataset):
             features = spectrogram_channels(
                 x,
                 channel_format=self.channel_format,
-                size=self.spectrogram_size,
                 freq_bins=self.spectrogram_freq_bins,
                 time_bins=self.spectrogram_time_bins,
                 nperseg=self.spectrogram_nperseg,
                 noverlap=self.spectrogram_noverlap,
                 window=self.spectrogram_window,
-                window_beta=self.spectrogram_window_beta,
             )
         elif self.representation == "features":
             features = handcrafted_features(x)
@@ -122,13 +116,11 @@ def get_data_loader(
     batch_size: int = 64,
     shuffle: bool = False,
     num_workers: int = 0,
-    spectrogram_size: int = 64,
-    spectrogram_freq_bins: int | None = None,
-    spectrogram_time_bins: int | None = None,
+    spectrogram_freq_bins: int = 64,
+    spectrogram_time_bins: int = 64,
     spectrogram_nperseg: int = 64,
     spectrogram_noverlap: int = 48,
     spectrogram_window: str = "hann",
-    spectrogram_window_beta: float = 0.0,
     **loader_kwargs,
 ) -> DataLoader:
     dataset = ModrecDataset(
@@ -140,13 +132,11 @@ def get_data_loader(
         channel_format=channel_format,
         remove_cfo=remove_cfo,
         cfo_estimator=cfo_estimator,
-        spectrogram_size=spectrogram_size,
         spectrogram_freq_bins=spectrogram_freq_bins,
         spectrogram_time_bins=spectrogram_time_bins,
         spectrogram_nperseg=spectrogram_nperseg,
         spectrogram_noverlap=spectrogram_noverlap,
         spectrogram_window=spectrogram_window,
-        spectrogram_window_beta=spectrogram_window_beta,
     )
     return DataLoader(
         dataset,
@@ -168,13 +158,11 @@ def load_dataset_loader(
     batch_size: int = 64,
     shuffle: bool = False,
     num_workers: int = 0,
-    spectrogram_size: int = 64,
-    spectrogram_freq_bins: int | None = None,
-    spectrogram_time_bins: int | None = None,
+    spectrogram_freq_bins: int = 64,
+    spectrogram_time_bins: int = 64,
     spectrogram_nperseg: int = 64,
     spectrogram_noverlap: int = 48,
     spectrogram_window: str = "hann",
-    spectrogram_window_beta: float = 0.0,
     **loader_kwargs,
 ) -> Tuple[DataLoader, np.ndarray, pl.DataFrame, Dict[str, int]]:
     signals, metadata = load_dataset(str(dataset_dir))
@@ -196,13 +184,11 @@ def load_dataset_loader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        spectrogram_size=spectrogram_size,
         spectrogram_freq_bins=spectrogram_freq_bins,
         spectrogram_time_bins=spectrogram_time_bins,
         spectrogram_nperseg=spectrogram_nperseg,
         spectrogram_noverlap=spectrogram_noverlap,
         spectrogram_window=spectrogram_window,
-        spectrogram_window_beta=spectrogram_window_beta,
         **loader_kwargs,
     )
     return loader, signals, metadata, label_to_id
@@ -294,6 +280,21 @@ def complex_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
     raise ValueError(f"Unsupported channel format: {channel_format}")
 
 
+def differential_complex_channels(x: np.ndarray) -> np.ndarray:
+    d = x[1:] * np.conj(x[:-1])
+    d = np.concatenate([d[:1], d])
+    scale = max(np.sqrt(np.mean(np.abs(d) ** 2)), np.finfo(np.float32).eps)
+    return np.stack((np.real(d) / scale, np.imag(d) / scale)).astype(np.float32)
+
+
+def apf_channels(x: np.ndarray) -> np.ndarray:
+    mag = normalized_log_magnitude(x)
+    cos_phase = np.cos(np.angle(x)).astype(np.float32)
+    sin_phase = np.sin(np.angle(x)).astype(np.float32)
+    inst_freq = instantaneous_frequency(x)
+    return np.stack((mag, cos_phase, sin_phase, inst_freq))
+
+
 def normalized_log_magnitude(x: np.ndarray) -> np.ndarray:
     mag = np.log1p(np.abs(x))
     return ((mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)).astype(np.float32)
@@ -311,26 +312,29 @@ def frequency_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
     return complex_channels(spectrum, channel_format)
 
 
+def _parse_window(window: str) -> str | tuple:
+    if ":" in window:
+        name, beta = window.split(":", 1)
+        return (name, float(beta))
+    return window
+
+
 def spectrogram_channels(
     x: np.ndarray,
     channel_format: str,
-    size: int = 64,
-    freq_bins: int | None = None,
-    time_bins: int | None = None,
+    freq_bins: int = 64,
+    time_bins: int = 64,
     nperseg: int = 64,
     noverlap: int = 48,
     window: str = "hann",
-    window_beta: float = 0.0,
 ) -> np.ndarray:
-    freq_bins = size if freq_bins is None else freq_bins
-    time_bins = size if time_bins is None else time_bins
     if freq_bins < nperseg:
         raise ValueError("spectrogram_freq_bins must be at least spectrogram_nperseg.")
     if time_bins < 1:
         raise ValueError("spectrogram_time_bins must be positive.")
     if noverlap >= nperseg:
         raise ValueError("spectrogram_noverlap must be less than spectrogram_nperseg.")
-    scipy_window = (window, window_beta) if window == "kaiser" else window
+    scipy_window = _parse_window(window)
     _, _, zxx = signal.spectrogram(
         x,
         window=scipy_window,

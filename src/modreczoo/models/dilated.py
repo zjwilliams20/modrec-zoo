@@ -16,7 +16,22 @@ class DilatedConvCell1D(nn.Module):
 
 
 class DilatedCNN1D(nn.Module):
-    """DCC-focused 1D CNN baseline over the full I/Q window."""
+    """Dilated causal-conv stack over the full I/Q window.
+
+    Stacks residual dilated convolution cells at exponentially increasing dilation
+    rates (1, 2, 4, 8, 16, 32), doubling the receptive field at each layer without
+    discarding spatial resolution. After each cell, both average- and max-pooled
+    features are collected and concatenated for classification — capturing structure
+    at every temporal scale simultaneously.
+
+    The dilated residual block design follows WaveNet's gated activation stack,
+    simplified to a BN+ReLU residual for discriminative training.
+
+    Citation:
+        van den Oord, Aaron, et al. "WaveNet: A Generative Model for Raw Audio."
+        *arXiv*, arXiv:1609.03499, 2016.
+        https://arxiv.org/abs/1609.03499
+    """
 
     def __init__(
         self,

@@ -6,6 +6,18 @@ import torch.nn.functional as F
 
 
 class TimeCNN(nn.Module):
+    """Three-layer 1D CNN baseline for time-domain I/Q signals.
+
+    Architecture follows the VT-CNN2 design introduced for automatic modulation
+    recognition on over-the-air signals.
+
+    Citation:
+        O'Shea, Timothy J., Johnathan Corgan, and T. Charles Clancy. "Convolutional
+        Radio Modulation Recognition Networks." *International Conference on
+        Engineering Applications of Neural Networks (EANN)*, 2016.
+        https://arxiv.org/abs/1602.04105
+    """
+
     def __init__(self, n_classes: int, n_samples: int, in_channels: int = 2) -> None:
         super().__init__()
         self.net = nn.Sequential(
@@ -106,6 +118,19 @@ class ResBlock2D(nn.Module):
 
 
 class SpectrogramResNet(nn.Module):
+    """2D ResNet applied to STFT spectrograms, with anisotropic kernels.
+
+    Follows the residual block structure of He et al., adapted for 2D spectrogram
+    inputs. Uses asymmetric (freq_kernel × time_kernel) convolutions throughout to
+    reflect the different physical scales of frequency and time structure.
+
+    Citation:
+        He, Kaiming, et al. "Deep Residual Learning for Image Recognition."
+        *Proceedings of the IEEE Conference on Computer Vision and Pattern
+        Recognition (CVPR)*, 2016, pp. 770–778.
+        https://arxiv.org/abs/1512.03385
+    """
+
     def __init__(
         self,
         n_classes: int,
@@ -166,6 +191,19 @@ class ResBlock1D(nn.Module):
 
 
 class ResNet1D(nn.Module):
+    """1D adaptation of the ResNet-18 architecture.
+
+    Stem + four residual stages with progressive channel doubling and stride-2
+    downsampling, followed by global average pooling. Residual shortcuts use a
+    1×1 projection when channel counts change.
+
+    Citation:
+        He, Kaiming, et al. "Deep Residual Learning for Image Recognition."
+        *Proceedings of the IEEE Conference on Computer Vision and Pattern
+        Recognition (CVPR)*, 2016, pp. 770–778.
+        https://arxiv.org/abs/1512.03385
+    """
+
     def __init__(
         self,
         n_classes: int,

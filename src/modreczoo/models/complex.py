@@ -47,7 +47,18 @@ class ComplexCNNBlock1D(nn.Module):
 
 
 class ComplexCNN1D(nn.Module):
-    """Small complex-valued CNN baseline for real/imag time-domain I/Q."""
+    """Small complex-valued CNN baseline for real/imag time-domain I/Q.
+
+    Implements complex-valued convolution as two tied real convolutions:
+        y_r = W_r * x_r − W_i * x_i
+        y_i = W_r * x_i + W_i * x_r
+    preserving the algebraic structure of C throughout the feature hierarchy.
+
+    Citation:
+        Trabelsi, Chiheb, et al. "Deep Complex Networks." *International Conference
+        on Learning Representations (ICLR)*, 2018.
+        https://arxiv.org/abs/1705.09792
+    """
 
     def __init__(self, n_classes: int, in_channels: int = 2) -> None:
         super().__init__()

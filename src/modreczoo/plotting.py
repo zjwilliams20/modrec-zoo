@@ -384,6 +384,77 @@ def plot_example_spectrograms(
     plt.close(fig_all)
 
 
+_CHANNEL_NAMES = {
+    "real_imag":           ["I", "Q"],
+    "mag":                 ["Mag"],
+    "mag_phase":           ["Mag", "Phase"],
+    "mag_inst_freq":       ["Mag", "InstFreq"],
+    "differential_complex":["Re(d)", "Im(d)"],
+    "apf":                 ["LogMag", "cos(ph)", "sin(ph)", "InstFreq"],
+}
+
+# Max samples to plot per 1-D channel (keeps subplots compact).
+_MAX_PLOT_SAMPLES = 512
+
+
+def plot_input_examples(
+    loader,
+    id_to_label: dict,
+    representation: str,
+    channel_format: str,
+    path: Path,
+) -> None:
+    """Plot one example per class as the model receives it, log-scale clipped for spectrograms."""
+    n_classes = len(id_to_label)
+    examples: dict = {}
+    for xb, yb in loader:
+        for x, y in zip(xb, yb):
+            cls = int(y.item())
+            if cls not in examples:
+                examples[cls] = x.cpu().numpy()
+            if len(examples) == n_classes:
+                break
+        if len(examples) == n_classes:
+            break
+
+    present = [i for i in range(n_classes) if i in examples]
+    n_channels = next(iter(examples.values())).shape[0]
+    ch_names = _CHANNEL_NAMES.get(channel_format, [f"ch{i}" for i in range(n_channels)])
+    # Pad or trim if channel count drifts from the table.
+    ch_names = list(ch_names[:n_channels]) + [f"ch{i}" for i in range(len(ch_names), n_channels)]
+
+    is_2d = representation == "spectrogram"
+    n_rows, n_cols = len(present), n_channels
+    cell_w, cell_h = (2.4, 2.0) if is_2d else (3.2, 1.2)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * cell_w, n_rows * cell_h), squeeze=False)
+    fig.suptitle(f"Input examples — {channel_format}", fontsize=10)
+
+    for row_idx, cls_id in enumerate(present):
+        x = examples[cls_id]
+        for col_idx in range(n_cols):
+            ax = axes[row_idx, col_idx]
+            ch = x[col_idx]
+            if is_2d:
+                ax.imshow(ch, aspect="auto", origin="lower", cmap="inferno", interpolation="nearest")
+                ax.set_xticks([])
+                ax.set_yticks([])
+            else:
+                sig = ch[:_MAX_PLOT_SAMPLES]
+                ax.plot(sig, linewidth=0.5, color="#1f77b4")
+                ax.set_xlim(0, len(sig) - 1)
+                ax.tick_params(labelsize=5)
+                ax.grid(True, alpha=0.2)
+            if row_idx == 0:
+                ax.set_title(ch_names[col_idx], fontsize=8)
+            if col_idx == 0:
+                ax.set_ylabel(id_to_label[cls_id], fontsize=7, rotation=0, ha="right", labelpad=40)
+
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_accuracy_by_snr(summary: pl.DataFrame, path: Path, title: str) -> None:
     x = summary["snr_bin_db"].to_numpy()
     y = summary["accuracy"].to_numpy()
