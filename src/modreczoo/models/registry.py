@@ -1,8 +1,8 @@
-from typing import Tuple
+from typing import Sequence, Tuple
 
 import torch.nn as nn
 
-from .baselines import FeatureMLP, ResNet1D, SpectrogramCNN, TimeCNN
+from .baselines import FeatureMLP, ResNet1D, SpectrogramCNN, SpectrogramResNet, TimeCNN
 from .complex import ComplexCNN1D
 from .dilated import DilatedCNN1D
 
@@ -11,6 +11,7 @@ MODEL_REPRESENTATIONS = {
     "time_cnn": "time",
     "frequency_cnn": "frequency",
     "spectrogram_cnn": "spectrogram",
+    "spectrogram_resnet": "spectrogram",
     "feature_mlp": "features",
     "resnet_1d": "time",
     "complex_cnn_1d": "time",
@@ -25,13 +26,43 @@ def representation_for_model(model_name: str) -> str:
         raise ValueError(f"Unsupported model: {model_name}") from exc
 
 
-def make_model(model_name: str, n_classes: int, n_samples: int, in_channels: int = 2) -> Tuple[nn.Module, str]:
+def make_model(
+    model_name: str,
+    n_classes: int,
+    n_samples: int,
+    in_channels: int = 2,
+    spectrogram_base_channels: int = 24,
+    spectrogram_kernel_size: int = 3,
+    spectrogram_freq_kernel: int = 5,
+    spectrogram_time_kernel: int = 3,
+    spectrogram_blocks_per_stage: Sequence[int] = (2, 2, 2, 2),
+) -> Tuple[nn.Module, str]:
     if model_name == "time_cnn":
         return TimeCNN(n_classes, n_samples, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "frequency_cnn":
         return TimeCNN(n_classes, n_samples, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "spectrogram_cnn":
-        return SpectrogramCNN(n_classes, in_channels=in_channels), representation_for_model(model_name)
+        return (
+            SpectrogramCNN(
+                n_classes,
+                in_channels=in_channels,
+                base_channels=spectrogram_base_channels,
+                kernel_size=spectrogram_kernel_size,
+            ),
+            representation_for_model(model_name),
+        )
+    if model_name == "spectrogram_resnet":
+        return (
+            SpectrogramResNet(
+                n_classes,
+                in_channels=in_channels,
+                base_channels=spectrogram_base_channels,
+                blocks_per_stage=spectrogram_blocks_per_stage,
+                freq_kernel=spectrogram_freq_kernel,
+                time_kernel=spectrogram_time_kernel,
+            ),
+            representation_for_model(model_name),
+        )
     if model_name == "feature_mlp":
         return FeatureMLP(n_classes, 10), representation_for_model(model_name)
     if model_name == "resnet_1d":

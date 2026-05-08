@@ -56,19 +56,53 @@ def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str])
     )
 
 
-def log_prf_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]) -> None:
+def log_f1_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]) -> None:
     label_ids = np.arange(len(labels))
-    for average in ("macro", "weighted"):
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            y_true,
-            y_pred,
-            labels=label_ids,
-            average=average,
-            zero_division=0,
-        )
-        mlflow.log_metric(f"{average}_precision", float(precision))
-        mlflow.log_metric(f"{average}_recall", float(recall))
-        mlflow.log_metric(f"{average}_f1", float(f1))
+    _, _, f1, _ = precision_recall_fscore_support(
+        y_true,
+        y_pred,
+        labels=label_ids,
+        average="macro",
+        zero_division=0,
+    )
+    mlflow.log_metric("macro_f1", float(f1))
+
+
+def bootstrap_accuracy(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> Dict[str, float]:
+    correct = (y_true == y_pred).astype(np.float32)
+    n = len(correct)
+    if n == 0:
+        return {
+            "n": 0,
+            "n_bootstrap": n_bootstrap,
+            "confidence": confidence,
+            "accuracy": float("nan"),
+            "bootstrap_mean": float("nan"),
+            "bootstrap_std": float("nan"),
+            "ci_lower": float("nan"),
+            "ci_upper": float("nan"),
+        }
+
+    rng = np.random.default_rng(seed)
+    sample_idx = rng.integers(0, n, size=(n_bootstrap, n))
+    boot_acc = correct[sample_idx].mean(axis=1)
+    alpha = (1.0 - confidence) / 2.0
+    return {
+        "n": n,
+        "n_bootstrap": n_bootstrap,
+        "confidence": confidence,
+        "accuracy": float(correct.mean()),
+        "bootstrap_mean": float(boot_acc.mean()),
+        "bootstrap_std": float(boot_acc.std(ddof=1)),
+        "ci_lower": float(np.quantile(boot_acc, alpha)),
+        "ci_upper": float(np.quantile(boot_acc, 1.0 - alpha)),
+    }
 
 
 def accuracy_by_snr(
@@ -179,6 +213,15 @@ def write_summary(
         f"Split sizes: train={getattr(args, 'n_train_examples', 'unknown')}, val={getattr(args, 'n_val_examples', 'unknown')}, test={getattr(args, 'n_test_examples', 'unknown')}",
         f"Epochs: {args.epochs}",
         f"Batch size: {args.batch_size}",
+        f"Spectrogram size: {getattr(args, 'spectrogram_size', 'n/a')}",
+        f"Spectrogram freq bins: {getattr(args, 'spectrogram_freq_bins', None) or getattr(args, 'spectrogram_size', 'n/a')}",
+        f"Spectrogram time bins: {getattr(args, 'spectrogram_time_bins', None) or getattr(args, 'spectrogram_size', 'n/a')}",
+        f"Spectrogram nperseg: {getattr(args, 'spectrogram_nperseg', 'n/a')}",
+        f"Spectrogram noverlap: {getattr(args, 'spectrogram_noverlap', 'n/a')}",
+        f"Spectrogram window: {getattr(args, 'spectrogram_window', 'n/a')}",
+        f"Spectrogram window beta: {getattr(args, 'spectrogram_window_beta', 'n/a')}",
+        f"Spectrogram base channels: {getattr(args, 'spectrogram_base_channels', 'n/a')}",
+        f"Spectrogram kernel size: {getattr(args, 'spectrogram_kernel_size', 'n/a')}",
         "",
     ]
     for result in results:
@@ -188,6 +231,14 @@ def write_summary(
                 f"Representation: {result['representation']}",
                 f"Best val accuracy: {result['best_val_accuracy']:.4f}",
                 f"Test accuracy: {result['test_accuracy']:.4f}",
+                (
+                    "Test accuracy bootstrap "
+                    f"{100 * result['accuracy_bootstrap']['confidence']:.0f}% CI: "
+                    f"[{result['accuracy_bootstrap']['ci_lower']:.4f}, "
+                    f"{result['accuracy_bootstrap']['ci_upper']:.4f}], "
+                    f"std={result['accuracy_bootstrap']['bootstrap_std']:.4f}, "
+                    f"n_bootstrap={result['accuracy_bootstrap']['n_bootstrap']}"
+                ),
                 f"ECE: {result['test_ece']:.4f}",
                 f"MCE: {result['test_mce']:.4f}",
                 "Accuracy versus SNR:",

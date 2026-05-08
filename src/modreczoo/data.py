@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
+import scipy.ndimage
 import scipy.signal as signal
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -51,6 +52,12 @@ class ModrecDataset(Dataset):
         remove_cfo: bool,
         cfo_estimator: str,
         spectrogram_size: int = 64,
+        spectrogram_freq_bins: int | None = None,
+        spectrogram_time_bins: int | None = None,
+        spectrogram_nperseg: int = 64,
+        spectrogram_noverlap: int = 48,
+        spectrogram_window: str = "hann",
+        spectrogram_window_beta: float = 0.0,
     ) -> None:
         self.signals = signals
         self.metadata = metadata
@@ -61,6 +68,12 @@ class ModrecDataset(Dataset):
         self.remove_cfo = remove_cfo
         self.cfo_estimator = cfo_estimator
         self.spectrogram_size = spectrogram_size
+        self.spectrogram_freq_bins = spectrogram_freq_bins
+        self.spectrogram_time_bins = spectrogram_time_bins
+        self.spectrogram_nperseg = spectrogram_nperseg
+        self.spectrogram_noverlap = spectrogram_noverlap
+        self.spectrogram_window = spectrogram_window
+        self.spectrogram_window_beta = spectrogram_window_beta
         self.labels = metadata["modulation"].to_numpy()
 
     def __len__(self) -> int:
@@ -78,7 +91,17 @@ class ModrecDataset(Dataset):
         elif self.representation == "frequency":
             features = frequency_channels(x, self.channel_format)
         elif self.representation == "spectrogram":
-            features = spectrogram_channels(x, channel_format=self.channel_format, size=self.spectrogram_size)
+            features = spectrogram_channels(
+                x,
+                channel_format=self.channel_format,
+                size=self.spectrogram_size,
+                freq_bins=self.spectrogram_freq_bins,
+                time_bins=self.spectrogram_time_bins,
+                nperseg=self.spectrogram_nperseg,
+                noverlap=self.spectrogram_noverlap,
+                window=self.spectrogram_window,
+                window_beta=self.spectrogram_window_beta,
+            )
         elif self.representation == "features":
             features = handcrafted_features(x)
         else:
@@ -100,6 +123,12 @@ def get_data_loader(
     shuffle: bool = False,
     num_workers: int = 0,
     spectrogram_size: int = 64,
+    spectrogram_freq_bins: int | None = None,
+    spectrogram_time_bins: int | None = None,
+    spectrogram_nperseg: int = 64,
+    spectrogram_noverlap: int = 48,
+    spectrogram_window: str = "hann",
+    spectrogram_window_beta: float = 0.0,
     **loader_kwargs,
 ) -> DataLoader:
     dataset = ModrecDataset(
@@ -112,6 +141,12 @@ def get_data_loader(
         remove_cfo=remove_cfo,
         cfo_estimator=cfo_estimator,
         spectrogram_size=spectrogram_size,
+        spectrogram_freq_bins=spectrogram_freq_bins,
+        spectrogram_time_bins=spectrogram_time_bins,
+        spectrogram_nperseg=spectrogram_nperseg,
+        spectrogram_noverlap=spectrogram_noverlap,
+        spectrogram_window=spectrogram_window,
+        spectrogram_window_beta=spectrogram_window_beta,
     )
     return DataLoader(
         dataset,
@@ -134,6 +169,12 @@ def load_dataset_loader(
     shuffle: bool = False,
     num_workers: int = 0,
     spectrogram_size: int = 64,
+    spectrogram_freq_bins: int | None = None,
+    spectrogram_time_bins: int | None = None,
+    spectrogram_nperseg: int = 64,
+    spectrogram_noverlap: int = 48,
+    spectrogram_window: str = "hann",
+    spectrogram_window_beta: float = 0.0,
     **loader_kwargs,
 ) -> Tuple[DataLoader, np.ndarray, pl.DataFrame, Dict[str, int]]:
     signals, metadata = load_dataset(str(dataset_dir))
@@ -156,6 +197,12 @@ def load_dataset_loader(
         shuffle=shuffle,
         num_workers=num_workers,
         spectrogram_size=spectrogram_size,
+        spectrogram_freq_bins=spectrogram_freq_bins,
+        spectrogram_time_bins=spectrogram_time_bins,
+        spectrogram_nperseg=spectrogram_nperseg,
+        spectrogram_noverlap=spectrogram_noverlap,
+        spectrogram_window=spectrogram_window,
+        spectrogram_window_beta=spectrogram_window_beta,
         **loader_kwargs,
     )
     return loader, signals, metadata, label_to_id
@@ -240,6 +287,10 @@ def complex_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
         mag = normalized_log_magnitude(x)
         inst_freq = instantaneous_frequency(x)
         return np.stack((mag, inst_freq)).astype(np.float32)
+    if channel_format == "differential_complex":
+        return differential_complex_channels(x)
+    if channel_format == "apf":
+        return apf_channels(x)
     raise ValueError(f"Unsupported channel format: {channel_format}")
 
 
@@ -260,19 +311,53 @@ def frequency_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
     return complex_channels(spectrum, channel_format)
 
 
-def spectrogram_channels(x: np.ndarray, channel_format: str, size: int = 64) -> np.ndarray:
-    _, _, zxx = signal.stft(x, nperseg=64, noverlap=48, nfft=size, return_onesided=False, boundary=None)
+def spectrogram_channels(
+    x: np.ndarray,
+    channel_format: str,
+    size: int = 64,
+    freq_bins: int | None = None,
+    time_bins: int | None = None,
+    nperseg: int = 64,
+    noverlap: int = 48,
+    window: str = "hann",
+    window_beta: float = 0.0,
+) -> np.ndarray:
+    freq_bins = size if freq_bins is None else freq_bins
+    time_bins = size if time_bins is None else time_bins
+    if freq_bins < nperseg:
+        raise ValueError("spectrogram_freq_bins must be at least spectrogram_nperseg.")
+    if time_bins < 1:
+        raise ValueError("spectrogram_time_bins must be positive.")
+    if noverlap >= nperseg:
+        raise ValueError("spectrogram_noverlap must be less than spectrogram_nperseg.")
+    scipy_window = (window, window_beta) if window == "kaiser" else window
+    _, _, zxx = signal.spectrogram(
+        x,
+        window=scipy_window,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        nfft=freq_bins,
+        detrend=False,
+        return_onesided=False,
+        scaling="spectrum",
+        mode="complex",
+    )
     zxx = np.fft.fftshift(zxx, axes=0)
+    if channel_format == "mag":
+        mag = np.log1p(np.abs(zxx))
+        mag = resize_2d(mag, freq_bins, time_bins)
+        mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
+        return mag[np.newaxis].astype(np.float32)
     if channel_format == "real_imag":
-        real = resize_2d(np.real(zxx), size, size)
-        imag = resize_2d(np.imag(zxx), size, size)
+        real = resize_2d(np.real(zxx), freq_bins, time_bins)
+        imag = resize_2d(np.imag(zxx), freq_bins, time_bins)
         scale = max(np.sqrt(np.mean(real**2 + imag**2)), np.finfo(np.float32).eps)
         return np.stack((real / scale, imag / scale)).astype(np.float32)
     if channel_format == "mag_phase":
         mag = np.log1p(np.abs(zxx))
         phase = np.angle(zxx)
-        mag = resize_2d(mag, size, size)
-        phase = resize_2d(phase, size, size)
+        mag = resize_2d(mag, freq_bins, time_bins)
+        phase = resize_2d(phase, freq_bins, time_bins)
         mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
         phase = phase / np.pi
         return np.stack((mag, phase)).astype(np.float32)
@@ -280,17 +365,18 @@ def spectrogram_channels(x: np.ndarray, channel_format: str, size: int = 64) -> 
         mag = np.log1p(np.abs(zxx))
         phase = np.unwrap(np.angle(zxx), axis=1)
         inst_freq = np.diff(phase, axis=1, prepend=phase[:, :1]) / np.pi
-        mag = resize_2d(mag, size, size)
-        inst_freq = resize_2d(inst_freq, size, size)
+        mag = resize_2d(mag, freq_bins, time_bins)
+        inst_freq = resize_2d(inst_freq, freq_bins, time_bins)
         mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
         return np.stack((mag, np.nan_to_num(inst_freq))).astype(np.float32)
     raise ValueError(f"Unsupported channel format: {channel_format}")
 
 
 def resize_2d(x: np.ndarray, rows: int, cols: int) -> np.ndarray:
-    row_idx = np.linspace(0, x.shape[0] - 1, rows).round().astype(int)
-    col_idx = np.linspace(0, x.shape[1] - 1, cols).round().astype(int)
-    return x[row_idx][:, col_idx]
+    if x.shape == (rows, cols):
+        return x
+    zoom_factors = (rows / x.shape[0], cols / x.shape[1])
+    return scipy.ndimage.zoom(x, zoom_factors, order=1)
 
 
 def handcrafted_features(x: np.ndarray) -> np.ndarray:

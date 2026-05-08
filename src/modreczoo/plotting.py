@@ -319,6 +319,71 @@ def plot_calibration_by_snr(summary: pl.DataFrame, path: Path, title: str) -> No
     plt.close(fig)
 
 
+def plot_example_spectrograms(
+    signals: np.ndarray,
+    metadata: pl.DataFrame,
+    output_dir: Path,
+    n_per_class: int = 3,
+    nperseg: int = 64,
+    noverlap: int = 48,
+    freq_bins: int = 64,
+    time_bins: int = 64,
+    window: str = "kaiser",
+    window_beta: float = 15.0,
+) -> None:
+    from modreczoo.data import normalize_signal, spectrogram_channels
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    modulations = sorted(metadata["modulation"].unique().to_list())
+    n_mods = len(modulations)
+
+    fig_all, axes_all = plt.subplots(
+        n_mods, n_per_class,
+        figsize=(n_per_class * 2.5, n_mods * 2.2),
+        squeeze=False,
+    )
+    fig_all.suptitle("Example spectrograms by modulation and SNR", fontsize=12, y=1.01)
+
+    def _render(x: np.ndarray) -> np.ndarray:
+        return spectrogram_channels(
+            x, channel_format="mag",
+            freq_bins=freq_bins, time_bins=time_bins,
+            nperseg=nperseg, noverlap=noverlap,
+            window=window, window_beta=window_beta,
+        )[0]
+
+    for row_idx, modulation in enumerate(modulations):
+        mod_df = metadata.filter(pl.col("modulation") == modulation).sort("snr_db")
+        n_total = len(mod_df)
+        snr_vals = mod_df["snr_db"].to_numpy()
+        signal_ids = mod_df["signal_id"].to_numpy()
+        pick_idxs = [min(int(round(i * (n_total - 1) / max(n_per_class - 1, 1))), n_total - 1) for i in range(n_per_class)]
+
+        fig_mod, axes_mod = plt.subplots(1, n_per_class, figsize=(n_per_class * 2.8, 3.0), squeeze=False)
+        fig_mod.suptitle(modulation, fontsize=12)
+
+        for col_idx, pick in enumerate(pick_idxs):
+            snr = float(snr_vals[pick])
+            spec = _render(normalize_signal(signals[int(signal_ids[pick])]))
+            for ax in (axes_mod[0, col_idx], axes_all[row_idx, col_idx]):
+                ax.imshow(spec, aspect="auto", origin="lower", cmap="inferno", interpolation="nearest")
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.set_title(f"{snr:.1f} dB", fontsize=8)
+            if col_idx == 0:
+                axes_all[row_idx, 0].set_ylabel(modulation, fontsize=8)
+
+        fig_mod.tight_layout()
+        fig_mod.savefig(output_dir / f"{safe_filename(modulation)}.png", dpi=160, bbox_inches="tight")
+        plt.close(fig_mod)
+
+    fig_all.tight_layout()
+    fig_all.savefig(output_dir / "overview.png", dpi=160, bbox_inches="tight")
+    plt.close(fig_all)
+
+
 def plot_accuracy_by_snr(summary: pl.DataFrame, path: Path, title: str) -> None:
     x = summary["snr_bin_db"].to_numpy()
     y = summary["accuracy"].to_numpy()
