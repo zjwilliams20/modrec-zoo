@@ -7,7 +7,9 @@
       "WebFetch(domain:arxiv.org)",
       "Bash(python *)",
       "Bash(uv add *)",
-      "Bash(uv run *)"
+      "Bash(uv run *)",
+      "Bash(python3 *)",
+      "Bash(DRY_RUN=1 bash *)"
     ]
   }
 }
