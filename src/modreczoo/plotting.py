@@ -392,6 +392,8 @@ _CHANNEL_NAMES = {
     "differential_complex":["Re(d)", "Im(d)"],
     "apf":                 ["LogMag", "cos(ph)", "sin(ph)", "InstFreq"],
     "complex_powers":      ["Re(x)", "Im(x)", "Re(x²)", "Im(x²)", "Re(x⁴)", "Im(x⁴)"],
+    "multilag":            ["Re(lag1)", "Im(lag1)", "Re(lag4)", "Im(lag4)", "Re(lag16)", "Im(lag16)"],
+    "cyclic_caf":          ["CAF lag1", "CAF lag4", "CAF lag16"],
     "scf":                 ["SCF"],
 }
 

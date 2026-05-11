@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .baselines import ResBlock1D, ResNet1D
+from .baselines import ResBlock1D
 
 
 class PatchTransformer1D(nn.Module):
@@ -196,77 +196,66 @@ class APFNet(nn.Module):
         return self.classifier(out.mean(dim=1))
 
 
-class MultiLagNet(nn.Module):
-    """Multi-lag conjugate product encoder for cyclostationary feature extraction.
+class MultiStreamNet(nn.Module):
+    """Channel-wise multi-stream encoder with attention fusion.
 
-    Extends the differential-complex approach (lag=1) to multiple lags. For each lag τ,
-    computes z[n]·z*[n−τ] whose angle is the phase change over τ samples. Three lags
-    (1, 4, 16) span short-, medium-, and long-range inter-symbol correlation across the
-    OSR range of 1–20 without requiring prior knowledge of the symbol rate. The six
-    resulting channels (2 per lag) are fed into a ResNet1D backbone.
+    Expects arbitrary C-channel time-series input. Each channel is processed by
+    an independent StreamEncoder, then the resulting feature tokens are fused via
+    a single multi-head self-attention layer. The number of attention heads is
+    derived from the input channel count, allowing channel-independent views to
+    interact after per-channel feature extraction.
 
-    Citation:
-        Gardner, William A. "Exploitation of Spectral Redundancy in Cyclostationary
-        Signals." *IEEE Signal Processing Magazine*, vol. 8, no. 2, 1991, pp. 14–36.
-        https://doi.org/10.1109/79.81007
-    """
+    This tests late fusion of independent channel views against the early fusion
+    used by standard convolutional backbones.
 
-    _LAGS = (1, 4, 16)
-
-    def __init__(self, n_classes: int, in_channels: int = 2) -> None:
-        super().__init__()
-        if in_channels != 2:
-            raise ValueError("MultiLagNet requires real_imag input with exactly 2 channels.")
-        self.backbone = ResNet1D(n_classes, in_channels=len(self._LAGS) * 2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 2, N) — real_imag
-        z = torch.view_as_complex(x.permute(0, 2, 1).contiguous())  # (B, N) complex
-        channels = []
-        eps = torch.finfo(x.dtype).eps
-        for tau in self._LAGS:
-            delayed = torch.roll(z, tau, dims=-1)
-            delayed[..., :tau] = 0
-            prod = z * delayed.conj()  # (B, N)
-            scale = prod.abs().pow(2).mean(dim=-1, keepdim=True).sqrt().clamp(min=eps)
-            channels.append(prod.real / scale)
-            channels.append(prod.imag / scale)
-        return self.backbone(torch.stack(channels, dim=1))
-
-
-class CyclicCAFNet(nn.Module):
-    """Cyclic Autocorrelation Function (CAF) spectrum classifier.
-
-    For each lag τ, computes the DFT of z[n]·z*[n−τ] over all n, giving the
-    CAF magnitude spectrum R^α(τ) indexed by cyclic frequency α=k/N. Cyclostationary
-    signals exhibit peaks in |R^α| at α = k·f_sym; an unknown OSR shifts the peak
-    position but leaves a detectable ridge. Three lags (1, 4, 16) produce three
-    magnitude spectra (channels), fed into a ResNet1D backbone.
+    The channel-token layout is related to inverted time-series Transformers,
+    while the late-fusion comparison follows prior multi-channel AMC work.
 
     Citations:
-        Gardner, William A. "Exploitation of Spectral Redundancy in Cyclostationary
-        Signals." *IEEE Signal Processing Magazine*, vol. 8, no. 2, 1991, pp. 14–36.
-        https://doi.org/10.1109/79.81007
+        Liu, Yong, et al. "iTransformer: Inverted Transformers are Effective for
+        Time Series Forecasting." *International Conference on Learning
+        Representations (ICLR)*, 2024.
+        https://arxiv.org/abs/2310.06625
+
+        Zhang, Z., et al. "Multi-channel Fusion Convolutional Neural Networks for
+        Automatic Modulation Classification." *IEEE Access*, vol. 8, 2020.
+        https://doi.org/10.1109/ACCESS.2020.2982633
+
+        Ramjee, Subramanian, et al. "Fast Deep Learning for Automatic Modulation
+        Classification." *IEEE Access*, vol. 7, 2019.
+        https://doi.org/10.1109/ACCESS.2019.2916568
     """
 
-    _LAGS = (1, 4, 16)
-
-    def __init__(self, n_classes: int, in_channels: int = 2) -> None:
+    def __init__(self, n_classes: int, in_channels: int, stream_dim: int = 64) -> None:
         super().__init__()
-        if in_channels != 2:
-            raise ValueError("CyclicCAFNet requires real_imag input with exactly 2 channels.")
-        self.backbone = ResNet1D(n_classes, in_channels=len(self._LAGS))
+        # PyTorch MHA requires embed_dim % num_heads == 0.
+        # We derive num_heads from in_channels and adjust stream_dim to be a multiple.
+        self.num_heads = in_channels
+        self.stream_dim = ((stream_dim + in_channels - 1) // in_channels) * in_channels
+
+        self.streams = nn.ModuleList([
+            _StreamEncoder(1, self.stream_dim) for _ in range(in_channels)
+        ])
+
+        self.attn = nn.MultiheadAttention(
+            embed_dim=self.stream_dim,
+            num_heads=self.num_heads,
+            batch_first=True
+        )
+        self.norm = nn.LayerNorm(self.stream_dim)
+        self.classifier = nn.Linear(self.stream_dim, n_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 2, N) — real_imag
-        z = torch.view_as_complex(x.permute(0, 2, 1).contiguous())  # (B, N) complex
-        eps = torch.finfo(x.dtype).eps
-        spectra = []
-        for tau in self._LAGS:
-            delayed = torch.roll(z, tau, dims=-1)
-            delayed[..., :tau] = 0
-            prod = z * delayed.conj()  # (B, N) complex
-            r_alpha = torch.fft.fft(prod, dim=-1).abs()  # (B, N) magnitude spectrum
-            scale = r_alpha.amax(dim=-1, keepdim=True).clamp(min=eps)
-            spectra.append(r_alpha / scale)
-        return self.backbone(torch.stack(spectra, dim=1))
+        # x: (B, C, N) where C = in_channels
+        # Encode each channel i into a token (B, stream_dim)
+        tokens = torch.stack([
+            enc(x[:, i : i + 1]) for i, enc in enumerate(self.streams)
+        ], dim=1)  # (B, C, stream_dim)
+
+        # Cross-channel attention (Interaction between C tokens)
+        out, _ = self.attn(tokens, tokens, tokens)
+        out = self.norm(out + tokens)
+
+        # Aggregate across channels (Global Pool over C dimension)
+        return self.classifier(out.mean(dim=1))
+

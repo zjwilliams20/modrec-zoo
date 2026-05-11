@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class TimeCNN(nn.Module):
-    """Three-layer 1D CNN baseline for time-domain I/Q signals.
+class CNN1D(nn.Module):
+    """Three-layer 1D CNN baseline (VT-CNN2 architecture).
 
     Architecture follows the VT-CNN2 design introduced for automatic modulation
     recognition on over-the-air signals.
@@ -18,7 +18,7 @@ class TimeCNN(nn.Module):
         https://arxiv.org/abs/1602.04105
     """
 
-    def __init__(self, n_classes: int, n_samples: int, in_channels: int = 2) -> None:
+    def __init__(self, n_classes: int, in_channels: int = 2) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv1d(in_channels, 32, kernel_size=9, padding=4),
@@ -40,7 +40,7 @@ class TimeCNN(nn.Module):
         return self.classifier(self.net(x).squeeze(-1))
 
 
-class SpectrogramCNN(nn.Module):
+class CNN2D(nn.Module):
     def __init__(
         self,
         n_classes: int,
@@ -117,8 +117,8 @@ class ResBlock2D(nn.Module):
         return F.relu(out + skip)
 
 
-class SpectrogramResNet(nn.Module):
-    """2D ResNet applied to STFT spectrograms, with anisotropic kernels.
+class ResNet2D(nn.Module):
+    """2D ResNet with anisotropic kernels for image-like signal representations.
 
     Follows the residual block structure of He et al., adapted for 2D spectrogram
     inputs. Uses asymmetric (freq_kernel × time_kernel) convolutions throughout to

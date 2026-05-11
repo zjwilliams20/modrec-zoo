@@ -14,6 +14,7 @@ from modreczoo.models import representation_for_model
 SIGNALS_FILE = "signals.npz"
 METADATA_FILE = "metadata.parquet"
 README_MODULATION_ORDER = ("2PSK", "4PSK", "8PSK", "pi/4-DQPSK", "16QAM", "64QAM", "256QAM", "MSK")
+CSP_LAGS = (1, 4, 16)
 
 
 def save_dataset(
@@ -279,6 +280,10 @@ def complex_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
         return apf_channels(x)
     if channel_format == "complex_powers":
         return complex_powers_channels(x)
+    if channel_format == "multilag":
+        return multilag_channels(x)
+    if channel_format == "cyclic_caf":
+        return cyclic_caf_channels(x)
     raise ValueError(f"Unsupported channel format: {channel_format}")
 
 
@@ -305,6 +310,42 @@ def complex_powers_channels(x: np.ndarray) -> np.ndarray:
     r2, i2 = _norm_pair(x ** 2)
     r4, i4 = _norm_pair(x ** 4)
     return np.stack((r1, i1, r2, i2, r4, i4))
+
+
+def lag_product(x: np.ndarray, lag: int) -> np.ndarray:
+    delayed = np.zeros_like(x)
+    delayed[lag:] = x[:-lag]
+    return x * np.conj(delayed)
+
+
+def multilag_channels(x: np.ndarray, lags: Tuple[int, ...] = CSP_LAGS) -> np.ndarray:
+    """Multi-lag conjugate products as real/imag channel pairs.
+
+    Extends differential-complex features to several lags. For each lag tau,
+    computes z[n] * z*[n - tau], whose angle is the phase change over tau samples.
+    """
+    channels = []
+    eps = np.finfo(np.float32).eps
+    for lag in lags:
+        prod = lag_product(x, lag)
+        scale = max(np.sqrt(np.mean(np.abs(prod) ** 2)), eps)
+        channels.extend((np.real(prod) / scale, np.imag(prod) / scale))
+    return np.stack(channels).astype(np.float32)
+
+
+def cyclic_caf_channels(x: np.ndarray, lags: Tuple[int, ...] = CSP_LAGS) -> np.ndarray:
+    """CAF magnitude spectra for several lags.
+
+    For each lag tau, computes the DFT magnitude of z[n] * z*[n - tau]. The
+    spectra are independently max-normalized and stacked as channels.
+    """
+    spectra = []
+    eps = np.finfo(np.float32).eps
+    for lag in lags:
+        prod = lag_product(x, lag)
+        r_alpha = np.abs(np.fft.fft(prod))
+        spectra.append(r_alpha / max(np.max(r_alpha), eps))
+    return np.stack(spectra).astype(np.float32)
 
 
 def apf_channels(x: np.ndarray) -> np.ndarray:

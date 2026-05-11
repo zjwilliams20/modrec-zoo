@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # Sweep of CSP-inspired architectures against the best-performing baselines.
 #
-# New models (forced formats):
-#   cpowers_resnet_1d  — complex_powers (Re/Im at orders 1, 2, 4)
-#   multilag_net_1d    — real_imag (multi-lag conjugate products, model-internal)
-#   cyclic_caf_1d      — real_imag (CAF magnitude spectra, model-internal)
-#   scf_resnet         — scf (2D spectral correlation function image)
+# Architecturally fused models (format is part of the model design):
+#   apf_net_1d         — apf (forced: 4-channel stream encoder)
+#   scf_resnet         — scf (forced: 2D spectral correlation image)
 #
-# Baselines for comparison (best from prior sweeps):
-#   apf_net_1d         — apf (forced)
-#   diff_resnet_1d     — differential_complex (forced)
-#   resnet_1d          — differential_complex (best general-purpose format)
+# Flexible baselines (swept over relevant formats):
+#   resnet_1d          — differential_complex, complex_powers, multilag, cyclic_caf
+#   multi_stream_1d    — differential_complex, complex_powers, multilag, cyclic_caf
 set -euo pipefail
 
 DATASET_DIR="${DATASET_DIR:-data/awgn_snr0_30}"
@@ -28,14 +25,10 @@ cmd=(
   --command sweep
   --dataset-dir "$DATASET_DIR"
   --models
-    cpowers_resnet_1d
-    multilag_net_1d
-    cyclic_caf_1d
-    scf_resnet
     apf_net_1d
-    diff_resnet_1d
     resnet_1d
-  --sweep-channel-formats differential_complex
+    multi_stream_1d
+  --sweep-channel-formats differential_complex complex_powers multilag cyclic_caf
   --epochs "$EPOCHS"
   --batch-size "$BATCH_SIZE"
   --num-workers "$NUM_WORKERS"

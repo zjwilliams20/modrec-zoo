@@ -2,17 +2,17 @@ from typing import Sequence, Tuple
 
 import torch.nn as nn
 
-from .advanced import APFNet, CyclicCAFNet, MultiLagNet, MultiScalePyramidNet, PatchTransformer1D
-from .baselines import FeatureMLP, ResNet1D, SpectrogramCNN, SpectrogramResNet, TimeCNN
+from .advanced import APFNet, MultiScalePyramidNet, MultiStreamNet, PatchTransformer1D
+from .baselines import CNN1D, CNN2D, FeatureMLP, ResNet1D, ResNet2D
 from .complex import ComplexCNN1D
 from .dilated import DilatedCNN1D
 
 
-# Models that require a specific channel format regardless of --channel-format.
+# Models that require a specific external channel format regardless of --channel-format.
 MODEL_REQUIRED_CHANNEL_FORMATS: dict[str, str] = {
     "apf_net_1d": "apf",
-    "diff_resnet_1d": "differential_complex",
-    "cpowers_resnet_1d": "complex_powers",
+    "multilag_net_1d": "multilag",
+    "cyclic_caf_1d": "cyclic_caf",
     "scf_resnet": "scf",
 }
 
@@ -27,9 +27,8 @@ MODEL_REPRESENTATIONS = {
     "dilated_cnn_1d": "time",
     "patch_transformer_1d": "time",
     "multiscale_pyramid_1d": "time",
-    "diff_resnet_1d": "time",
     "apf_net_1d": "time",
-    "cpowers_resnet_1d": "time",
+    "multi_stream_1d": "time",
     "multilag_net_1d": "time",
     "cyclic_caf_1d": "time",
     "scf_resnet": "spectrogram",
@@ -61,12 +60,12 @@ def make_model(
     transformer_n_layers: int = 4,
 ) -> Tuple[nn.Module, str]:
     if model_name == "time_cnn":
-        return TimeCNN(n_classes, n_samples, in_channels=in_channels), representation_for_model(model_name)
+        return CNN1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "frequency_cnn":
-        return TimeCNN(n_classes, n_samples, in_channels=in_channels), representation_for_model(model_name)
+        return CNN1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "spectrogram_cnn":
         return (
-            SpectrogramCNN(
+            CNN2D(
                 n_classes,
                 in_channels=in_channels,
                 base_channels=spectrogram_base_channels,
@@ -75,7 +74,7 @@ def make_model(
         )
     if model_name == "spectrogram_resnet":
         return (
-            SpectrogramResNet(
+            ResNet2D(
                 n_classes,
                 in_channels=in_channels,
                 base_channels=spectrogram_base_channels,
@@ -107,19 +106,17 @@ def make_model(
         )
     if model_name == "multiscale_pyramid_1d":
         return MultiScalePyramidNet(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "diff_resnet_1d":
-        return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "apf_net_1d":
         return APFNet(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "cpowers_resnet_1d":
-        return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
+    if model_name == "multi_stream_1d":
+        return MultiStreamNet(n_classes, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "multilag_net_1d":
-        return MultiLagNet(n_classes), representation_for_model(model_name)
+        return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "cyclic_caf_1d":
-        return CyclicCAFNet(n_classes), representation_for_model(model_name)
+        return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "scf_resnet":
         return (
-            SpectrogramResNet(
+            ResNet2D(
                 n_classes,
                 in_channels=in_channels,
                 base_channels=spectrogram_base_channels,

@@ -30,12 +30,15 @@ from modreczoo.models import make_model, representation_for_model, required_chan
 
 CFO_ESTIMATORS = ("lag_correlation", "phase_slope", "spectral_centroid")
 CFO_SWEEP_MODES = ("raw", *CFO_ESTIMATORS)
-CHANNEL_FORMATS = ("real_imag", "mag", "mag_phase", "mag_inst_freq", "differential_complex", "apf", "complex_powers", "scf")
+CHANNEL_FORMATS = (
+    "real_imag", "mag", "mag_phase", "mag_inst_freq", "differential_complex",
+    "apf", "complex_powers", "multilag", "cyclic_caf", "scf",
+)
 MODEL_NAMES = (
     "time_cnn", "frequency_cnn", "spectrogram_cnn", "spectrogram_resnet",
     "feature_mlp", "resnet_1d", "complex_cnn_1d", "dilated_cnn_1d",
-    "patch_transformer_1d", "multiscale_pyramid_1d", "diff_resnet_1d", "apf_net_1d",
-    "cpowers_resnet_1d", "multilag_net_1d", "cyclic_caf_1d", "scf_resnet",
+    "patch_transformer_1d", "multiscale_pyramid_1d", "multi_stream_1d", "apf_net_1d",
+    "multilag_net_1d", "cyclic_caf_1d", "scf_resnet",
 )
 SNR_BIN_WIDTH = 4.0
 MLFLOW_DIR = Path("mlflow").absolute()
@@ -149,7 +152,7 @@ def train_one_model(
 ) -> Dict:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     representation = representation_for_model(model_name)
-    channel_format = required_channel_format_for(model_name) or args.channel_format
+    channel_format = effective_channel_format_for(model_name, args.channel_format)
     model, representation = make_model(
         model_name,
         len(label_to_id),
@@ -312,6 +315,17 @@ def train_one_model(
     }
 
 
+def effective_channel_format_for(model_name: str, requested_format: str) -> str:
+    """Return the channel format the DataLoader should use for this model.
+
+    Priority: forced external format > user request.
+    """
+    forced = required_channel_format_for(model_name)
+    if forced:
+        return forced
+    return requested_format
+
+
 def input_channels_for(representation: str, channel_format: str) -> int:
     if representation == "features":
         return 1
@@ -319,6 +333,10 @@ def input_channels_for(representation: str, channel_format: str) -> int:
         return 4
     if channel_format == "complex_powers":
         return 6
+    if channel_format == "multilag":
+        return 6
+    if channel_format == "cyclic_caf":
+        return 3
     if channel_format in ("mag", "scf"):
         return 1
     return 2
@@ -422,8 +440,11 @@ def iter_sweep_args(args: argparse.Namespace) -> List[argparse.Namespace]:
     configs = []
     seen = set()
     for model_name in args.models:
-        forced_format = required_channel_format_for(model_name)
-        channel_formats = [forced_format] if forced_format else args.sweep_channel_formats
+        channel_formats = (
+            [effective_channel_format_for(model_name, args.sweep_channel_formats[0])]
+            if required_channel_format_for(model_name)
+            else args.sweep_channel_formats
+        )
         for channel_format in channel_formats:
             for batch_size in batch_sizes:
                 for cfo_mode in cfo_modes:
@@ -516,7 +537,7 @@ def log_common_params(
             "n_train_examples": args.n_train_examples,
             "n_val_examples": args.n_val_examples,
             "n_test_examples": args.n_test_examples,
-            "channel_format": required_channel_format_for(model_name) or args.channel_format,
+            "channel_format": effective_channel_format_for(model_name, args.channel_format),
             "remove_cfo": args.remove_cfo,
             "cfo_estimator": effective_cfo_estimator(args),
             "spectrogram_freq_bins": args.spectrogram_freq_bins,
