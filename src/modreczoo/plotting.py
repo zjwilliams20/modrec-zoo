@@ -391,6 +391,8 @@ _CHANNEL_NAMES = {
     "mag_inst_freq":       ["Mag", "InstFreq"],
     "differential_complex":["Re(d)", "Im(d)"],
     "apf":                 ["LogMag", "cos(ph)", "sin(ph)", "InstFreq"],
+    "complex_powers":      ["Re(x)", "Im(x)", "Re(x²)", "Im(x²)", "Re(x⁴)", "Im(x⁴)"],
+    "scf":                 ["SCF"],
 }
 
 # Max samples to plot per 1-D channel (keeps subplots compact).

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .baselines import ResBlock1D
+from .baselines import ResBlock1D, ResNet1D
 
 
 class PatchTransformer1D(nn.Module):
@@ -194,3 +194,79 @@ class APFNet(nn.Module):
         out, _ = self.attn(tokens, tokens, tokens)
         out = self.norm(out + tokens)
         return self.classifier(out.mean(dim=1))
+
+
+class MultiLagNet(nn.Module):
+    """Multi-lag conjugate product encoder for cyclostationary feature extraction.
+
+    Extends the differential-complex approach (lag=1) to multiple lags. For each lag τ,
+    computes z[n]·z*[n−τ] whose angle is the phase change over τ samples. Three lags
+    (1, 4, 16) span short-, medium-, and long-range inter-symbol correlation across the
+    OSR range of 1–20 without requiring prior knowledge of the symbol rate. The six
+    resulting channels (2 per lag) are fed into a ResNet1D backbone.
+
+    Citation:
+        Gardner, William A. "Exploitation of Spectral Redundancy in Cyclostationary
+        Signals." *IEEE Signal Processing Magazine*, vol. 8, no. 2, 1991, pp. 14–36.
+        https://doi.org/10.1109/79.81007
+    """
+
+    _LAGS = (1, 4, 16)
+
+    def __init__(self, n_classes: int, in_channels: int = 2) -> None:
+        super().__init__()
+        if in_channels != 2:
+            raise ValueError("MultiLagNet requires real_imag input with exactly 2 channels.")
+        self.backbone = ResNet1D(n_classes, in_channels=len(self._LAGS) * 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 2, N) — real_imag
+        z = torch.view_as_complex(x.permute(0, 2, 1).contiguous())  # (B, N) complex
+        channels = []
+        eps = torch.finfo(x.dtype).eps
+        for tau in self._LAGS:
+            delayed = torch.roll(z, tau, dims=-1)
+            delayed[..., :tau] = 0
+            prod = z * delayed.conj()  # (B, N)
+            scale = prod.abs().pow(2).mean(dim=-1, keepdim=True).sqrt().clamp(min=eps)
+            channels.append(prod.real / scale)
+            channels.append(prod.imag / scale)
+        return self.backbone(torch.stack(channels, dim=1))
+
+
+class CyclicCAFNet(nn.Module):
+    """Cyclic Autocorrelation Function (CAF) spectrum classifier.
+
+    For each lag τ, computes the DFT of z[n]·z*[n−τ] over all n, giving the
+    CAF magnitude spectrum R^α(τ) indexed by cyclic frequency α=k/N. Cyclostationary
+    signals exhibit peaks in |R^α| at α = k·f_sym; an unknown OSR shifts the peak
+    position but leaves a detectable ridge. Three lags (1, 4, 16) produce three
+    magnitude spectra (channels), fed into a ResNet1D backbone.
+
+    Citations:
+        Gardner, William A. "Exploitation of Spectral Redundancy in Cyclostationary
+        Signals." *IEEE Signal Processing Magazine*, vol. 8, no. 2, 1991, pp. 14–36.
+        https://doi.org/10.1109/79.81007
+    """
+
+    _LAGS = (1, 4, 16)
+
+    def __init__(self, n_classes: int, in_channels: int = 2) -> None:
+        super().__init__()
+        if in_channels != 2:
+            raise ValueError("CyclicCAFNet requires real_imag input with exactly 2 channels.")
+        self.backbone = ResNet1D(n_classes, in_channels=len(self._LAGS))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 2, N) — real_imag
+        z = torch.view_as_complex(x.permute(0, 2, 1).contiguous())  # (B, N) complex
+        eps = torch.finfo(x.dtype).eps
+        spectra = []
+        for tau in self._LAGS:
+            delayed = torch.roll(z, tau, dims=-1)
+            delayed[..., :tau] = 0
+            prod = z * delayed.conj()  # (B, N) complex
+            r_alpha = torch.fft.fft(prod, dim=-1).abs()  # (B, N) magnitude spectrum
+            scale = r_alpha.amax(dim=-1, keepdim=True).clamp(min=eps)
+            spectra.append(r_alpha / scale)
+        return self.backbone(torch.stack(spectra, dim=1))

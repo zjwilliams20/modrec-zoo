@@ -1,3 +1,4 @@
+import time
 from jsonargparse import ArgumentParser
 from typing import List
 import argparse
@@ -184,23 +185,30 @@ def main() -> None:
                 f"[{sweep_index}/{len(configs)}] {run_name_for(cfg, model_name)} "
                 f"epochs={cfg.epochs} lr={cfg.lr:g} seed={cfg.seed}"
             )
-            run_config(
-                cfg,
-                model_name,
-                train_signals,
-                train_metadata,
-                val_signals,
-                val_metadata,
-                test_signals,
-                test_metadata,
-                label_to_id,
-                id_to_label,
-                labels,
-                splits,
-                sweep_index,
-                len(configs),
-                config_yaml=config_yaml,
-            )
+            try:
+                run_config(
+                    cfg,
+                    model_name,
+                    train_signals,
+                    train_metadata,
+                    val_signals,
+                    val_metadata,
+                    test_signals,
+                    test_metadata,
+                    label_to_id,
+                    id_to_label,
+                    labels,
+                    splits,
+                    sweep_index,
+                    len(configs),
+                    config_yaml=config_yaml,
+                )
+            except KeyboardInterrupt:
+                print(f"\n  Skipping {run_name_for(cfg, model_name)}. Ctrl+C again within 2s to quit.")
+                try:
+                    time.sleep(2.0)
+                except KeyboardInterrupt:
+                    raise SystemExit(1)
 
 
 if __name__ == "__main__":

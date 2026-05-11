@@ -277,6 +277,8 @@ def complex_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
         return differential_complex_channels(x)
     if channel_format == "apf":
         return apf_channels(x)
+    if channel_format == "complex_powers":
+        return complex_powers_channels(x)
     raise ValueError(f"Unsupported channel format: {channel_format}")
 
 
@@ -285,6 +287,24 @@ def differential_complex_channels(x: np.ndarray) -> np.ndarray:
     d = np.concatenate([d[:1], d])
     scale = max(np.sqrt(np.mean(np.abs(d) ** 2)), np.finfo(np.float32).eps)
     return np.stack((np.real(d) / scale, np.imag(d) / scale)).astype(np.float32)
+
+
+def complex_powers_channels(x: np.ndarray) -> np.ndarray:
+    """6-channel encoding of orders 1, 2, 4: [Re(x), Im(x), Re(x²), Im(x²), Re(x⁴), Im(x⁴)].
+
+    Each pair is RMS-normalized independently. x^M removes phase modulation at order M,
+    so BPSK/MSK features concentrate in x², and QAM-order cumulants appear in x⁴.
+    """
+    eps = np.finfo(np.float32).eps
+
+    def _norm_pair(z: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        scale = max(np.sqrt(np.mean(np.abs(z) ** 2)), eps)
+        return (np.real(z) / scale).astype(np.float32), (np.imag(z) / scale).astype(np.float32)
+
+    r1, i1 = _norm_pair(x)
+    r2, i2 = _norm_pair(x ** 2)
+    r4, i4 = _norm_pair(x ** 4)
+    return np.stack((r1, i1, r2, i2, r4, i4))
 
 
 def apf_channels(x: np.ndarray) -> np.ndarray:
@@ -373,6 +393,8 @@ def spectrogram_channels(
         inst_freq = resize_2d(inst_freq, freq_bins, time_bins)
         mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
         return np.stack((mag, np.nan_to_num(inst_freq))).astype(np.float32)
+    if channel_format == "scf":
+        return scf_channels(x, n_alpha=time_bins, n_freq=freq_bins, nperseg=nperseg)
     raise ValueError(f"Unsupported channel format: {channel_format}")
 
 
@@ -381,6 +403,45 @@ def resize_2d(x: np.ndarray, rows: int, cols: int) -> np.ndarray:
         return x
     zoom_factors = (rows / x.shape[0], cols / x.shape[1])
     return scipy.ndimage.zoom(x, zoom_factors, order=1)
+
+
+def scf_channels(
+    x: np.ndarray,
+    n_alpha: int = 64,
+    n_freq: int = 64,
+    nperseg: int = 64,
+) -> np.ndarray:
+    """Spectral Correlation Function (SCF) as a (1, n_alpha, n_freq) image.
+
+    Computes S^alpha(f) via STFT cross-correlation: for each cyclic-frequency
+    offset Δk ∈ [0, n_alpha), S[Δk, k] = mean_t(X[k+Δk, t] · X*[k, t]).
+    The magnitude |S| encodes the cyclostationary footprint of the modulation.
+
+    Citation:
+        Roberts, R.S., et al. "Computationally Efficient Algorithms for Cyclic
+        Spectral Analysis." IEEE Signal Processing Magazine, vol. 8, no. 2,
+        1991, pp. 38–49. https://doi.org/10.1109/79.81008
+    """
+    noverlap = nperseg * 3 // 4
+    _, _, zxx = signal.spectrogram(
+        x,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=noverlap,
+        nfft=n_freq,
+        detrend=False,
+        return_onesided=False,
+        scaling="spectrum",
+        mode="complex",
+    )
+    # zxx: (n_freq, n_time)
+    n_f, n_t = zxx.shape
+    scf = np.zeros((n_alpha, n_f), dtype=np.float32)
+    for dk in range(n_alpha):
+        shifted = np.roll(zxx, -dk, axis=0)
+        scf[dk] = np.abs(np.mean(zxx * np.conj(shifted), axis=1))
+    scf = (scf - np.mean(scf)) / max(np.std(scf), np.finfo(np.float32).eps)
+    return scf[np.newaxis]
 
 
 def handcrafted_features(x: np.ndarray) -> np.ndarray:

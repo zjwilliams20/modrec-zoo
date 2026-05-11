@@ -2,7 +2,7 @@ from typing import Sequence, Tuple
 
 import torch.nn as nn
 
-from .advanced import APFNet, MultiScalePyramidNet, PatchTransformer1D
+from .advanced import APFNet, CyclicCAFNet, MultiLagNet, MultiScalePyramidNet, PatchTransformer1D
 from .baselines import FeatureMLP, ResNet1D, SpectrogramCNN, SpectrogramResNet, TimeCNN
 from .complex import ComplexCNN1D
 from .dilated import DilatedCNN1D
@@ -12,6 +12,8 @@ from .dilated import DilatedCNN1D
 MODEL_REQUIRED_CHANNEL_FORMATS: dict[str, str] = {
     "apf_net_1d": "apf",
     "diff_resnet_1d": "differential_complex",
+    "cpowers_resnet_1d": "complex_powers",
+    "scf_resnet": "scf",
 }
 
 MODEL_REPRESENTATIONS = {
@@ -27,6 +29,10 @@ MODEL_REPRESENTATIONS = {
     "multiscale_pyramid_1d": "time",
     "diff_resnet_1d": "time",
     "apf_net_1d": "time",
+    "cpowers_resnet_1d": "time",
+    "multilag_net_1d": "time",
+    "cyclic_caf_1d": "time",
+    "scf_resnet": "spectrogram",
 }
 
 
@@ -105,4 +111,21 @@ def make_model(
         return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "apf_net_1d":
         return APFNet(n_classes, in_channels=in_channels), representation_for_model(model_name)
+    if model_name == "cpowers_resnet_1d":
+        return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
+    if model_name == "multilag_net_1d":
+        return MultiLagNet(n_classes), representation_for_model(model_name)
+    if model_name == "cyclic_caf_1d":
+        return CyclicCAFNet(n_classes), representation_for_model(model_name)
+    if model_name == "scf_resnet":
+        return (
+            SpectrogramResNet(
+                n_classes,
+                in_channels=in_channels,
+                base_channels=spectrogram_base_channels,
+                freq_kernel=spectrogram_freq_kernel,
+                time_kernel=spectrogram_time_kernel,
+            ),
+            representation_for_model(model_name),
+        )
     raise ValueError(f"Unsupported model: {model_name}")

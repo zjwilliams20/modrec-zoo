@@ -30,11 +30,12 @@ from modreczoo.models import make_model, representation_for_model, required_chan
 
 CFO_ESTIMATORS = ("lag_correlation", "phase_slope", "spectral_centroid")
 CFO_SWEEP_MODES = ("raw", *CFO_ESTIMATORS)
-CHANNEL_FORMATS = ("real_imag", "mag", "mag_phase", "mag_inst_freq", "differential_complex", "apf")
+CHANNEL_FORMATS = ("real_imag", "mag", "mag_phase", "mag_inst_freq", "differential_complex", "apf", "complex_powers", "scf")
 MODEL_NAMES = (
     "time_cnn", "frequency_cnn", "spectrogram_cnn", "spectrogram_resnet",
     "feature_mlp", "resnet_1d", "complex_cnn_1d", "dilated_cnn_1d",
     "patch_transformer_1d", "multiscale_pyramid_1d", "diff_resnet_1d", "apf_net_1d",
+    "cpowers_resnet_1d", "multilag_net_1d", "cyclic_caf_1d", "scf_resnet",
 )
 SNR_BIN_WIDTH = 4.0
 MLFLOW_DIR = Path("mlflow").absolute()
@@ -316,7 +317,9 @@ def input_channels_for(representation: str, channel_format: str) -> int:
         return 1
     if channel_format == "apf":
         return 4
-    if channel_format == "mag":
+    if channel_format == "complex_powers":
+        return 6
+    if channel_format in ("mag", "scf"):
         return 1
     return 2
 
