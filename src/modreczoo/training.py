@@ -10,6 +10,7 @@ import numpy as np
 import polars as pl
 import torch
 import torch.nn.functional as F
+from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -21,8 +22,11 @@ from modreczoo.evaluation import (
     calibration_by_snr,
     calibration_stats,
     evaluate,
+    information_by_snr,
+    information_summary,
     log_f1_metrics,
     per_class_metrics,
+    union_bound_accuracy_by_snr,
     write_summary,
 )
 from modreczoo.models import make_model, representation_for_model, required_channel_format_for
@@ -51,6 +55,42 @@ EXPERIMENT_NAME = "modrec"
 def sync_if_cuda(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+def model_parameter_counts(model: torch.nn.Module) -> Dict[str, int]:
+    params = list(model.parameters())
+    return {
+        "model_num_parameters": int(sum(p.numel() for p in params)),
+        "model_trainable_parameters": int(sum(p.numel() for p in params if p.requires_grad)),
+    }
+
+
+def model_io_info(
+    model: torch.nn.Module,
+    train_loader: torch.utils.data.DataLoader,
+    id_to_label: Dict[int, str],
+    representation: str,
+    channel_format: str,
+    device: torch.device,
+) -> Tuple[Dict[str, Any], np.ndarray, Any]:
+    sample_x, _ = train_loader.dataset[0]
+    input_example = sample_x.unsqueeze(0).cpu().numpy()
+    model.eval()
+    with torch.no_grad():
+        output_example = model(sample_x.unsqueeze(0).to(device)).detach().cpu().numpy()
+    return (
+        {
+            "input_shape": list(input_example.shape),
+            "input_dtype": str(input_example.dtype),
+            "output_shape": list(output_example.shape),
+            "output_dtype": str(output_example.dtype),
+            "representation": representation,
+            "channel_format": channel_format,
+            "labels": [id_to_label[i] for i in range(len(id_to_label))],
+        },
+        input_example,
+        infer_signature(input_example, output_example),
+    )
 
 
 def stratified_split(labels: np.ndarray, train_frac: float, val_frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -239,10 +279,34 @@ def train_one_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    mlflow.pytorch.log_model(model, artifact_path="model", registered_model_name=model_name)
+    parameter_counts = model_parameter_counts(model)
+    model_info, input_example, signature = model_io_info(
+        model, train_loader, id_to_label, representation, channel_format, device
+    )
+    mlflow.log_params(parameter_counts)
+    mlflow.log_dict({**parameter_counts, **model_info}, "model_info.json")
+    mlflow.pytorch.log_model(
+        model,
+        artifact_path="model",
+        registered_model_name=model_name,
+        input_example=input_example,
+        signature=signature,
+        metadata={**parameter_counts, **model_info},
+        params=parameter_counts,
+    )
     test_metrics = evaluate(model, test_loader, device, len(label_to_id), desc="test")
     accuracy_bootstrap = bootstrap_accuracy(test_metrics["y_true"], test_metrics["y_pred"], seed=args.seed)
     snr_summary = accuracy_by_snr(test_metadata, test_idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
+    info_summary = information_summary(test_metrics["confusion"], test_metrics["nll_bits"])
+    info_snr_summary = information_by_snr(
+        test_metadata,
+        test_idx,
+        test_metrics["y_true"],
+        test_metrics["y_pred"],
+        test_metrics["nll_bits"],
+        len(label_to_id),
+        SNR_BIN_WIDTH,
+    )
     labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
     class_summary = per_class_metrics(test_metrics["y_true"], test_metrics["y_pred"], labels_ordered)
     artifact_dir = MLFLOW_STAGING / mlflow.active_run().info.run_id
@@ -250,12 +314,17 @@ def train_one_model(
     confusion_path = artifact_dir / "confusion_matrix.png"
     snr_plot_path = artifact_dir / "accuracy_vs_snr.png"
     snr_csv_path = artifact_dir / "accuracy_vs_snr.csv"
+    ub_csv_path = artifact_dir / "union_bound_by_snr.csv"
     class_csv_path = artifact_dir / "per_class_metrics.csv"
     accuracy_bootstrap_path = artifact_dir / "accuracy_bootstrap.csv"
+    info_summary_path = artifact_dir / "information_summary.csv"
+    info_snr_path = artifact_dir / "information_by_snr.csv"
+    info_plot_path = artifact_dir / "information_by_snr.png"
     from modreczoo.plotting import (
         plot_accuracy_by_snr,
         plot_calibration_by_snr,
         plot_confusion_matrix,
+        plot_information_by_snr,
         plot_input_examples,
         plot_reliability_diagram,
     )
@@ -264,11 +333,27 @@ def train_one_model(
     plot_input_examples(train_loader, id_to_label, representation, channel_format, input_examples_path)
     mlflow.log_artifact(str(input_examples_path), artifact_path="plots")
 
+    snr_bins = snr_summary["snr_bin_db"].to_numpy()
+    ub_summary = union_bound_accuracy_by_snr(snr_bins, labels_ordered)
+    mi_fraction = np.clip(
+        info_snr_summary["mi_nll_lower_bound_bits"].to_numpy()
+        / info_snr_summary["label_entropy_bits"].to_numpy(),
+        0.0, 1.0,
+    )
+    overlays = {
+        "Union bound (erfc)": ub_summary["union_bound_accuracy"].to_numpy(),
+        "MI fraction (NLL lower bound)": mi_fraction,
+    }
+
     plot_confusion_matrix(test_metrics["confusion"], labels_ordered, confusion_path, model_name)
-    plot_accuracy_by_snr(snr_summary, snr_plot_path, model_name)
+    plot_accuracy_by_snr(snr_summary, snr_plot_path, model_name, overlays=overlays)
+    plot_information_by_snr(info_snr_summary, info_summary, info_plot_path, model_name)
     snr_summary.write_csv(snr_csv_path)
+    ub_summary.write_csv(ub_csv_path)
     class_summary.write_csv(class_csv_path)
     pl.DataFrame([accuracy_bootstrap]).write_csv(accuracy_bootstrap_path)
+    pl.DataFrame([info_summary]).write_csv(info_summary_path)
+    info_snr_summary.write_csv(info_snr_path)
     calib_df, ece, mce = calibration_stats(
         test_metrics["y_true"], test_metrics["confidence"], test_metrics["y_pred"]
     )
@@ -285,11 +370,15 @@ def train_one_model(
     calib_snr_df.write_csv(calib_snr_csv_path)
     mlflow.log_artifact(str(confusion_path), artifact_path="plots")
     mlflow.log_artifact(str(snr_plot_path), artifact_path="plots")
+    mlflow.log_artifact(str(info_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(reliability_path), artifact_path="plots")
     mlflow.log_artifact(str(calib_snr_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(snr_csv_path), artifact_path="tables")
+    mlflow.log_artifact(str(ub_csv_path), artifact_path="tables")
     mlflow.log_artifact(str(class_csv_path), artifact_path="tables")
     mlflow.log_artifact(str(accuracy_bootstrap_path), artifact_path="tables")
+    mlflow.log_artifact(str(info_summary_path), artifact_path="tables")
+    mlflow.log_artifact(str(info_snr_path), artifact_path="tables")
     mlflow.log_artifact(str(calib_csv_path), artifact_path="tables")
     mlflow.log_artifact(str(calib_snr_csv_path), artifact_path="tables")
     mlflow.log_metric("test_accuracy", test_metrics["accuracy"])
@@ -309,6 +398,8 @@ def train_one_model(
         "test_mce": mce,
         "confusion": test_metrics["confusion"],
         "accuracy_by_snr": snr_summary,
+        "information_summary": pl.DataFrame([info_summary]),
+        "information_by_snr": info_snr_summary,
         "per_class_metrics": class_summary,
         "calibration_stats": calib_df,
         "confusion_path": str(confusion_path),

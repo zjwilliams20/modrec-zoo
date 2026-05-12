@@ -34,6 +34,14 @@ signal features. Planned literature baselines include:
 * SVM-feature network: https://ieeexplore.ieee.org/document/8610499
 * Capsule network approach: https://digitalcommons.odu.edu/cgi/viewcontent.cgi?article=1425&context=ece_fac_pubs
 
+Potential research directions include:
+* OOD pushes
+* Multi-task learning: predict SNR, OSR, CFO, STO, does this help?
+* Differentiable preprocessing: channel formats, continuously valued powers, fractional delays
+* Architectures: generative stuff, KAN?
+* Better algorithms for uncertainty awareness
+* Upper bound using oracle information
+
 ## Usage
 
 Install the project in editable mode with uv:

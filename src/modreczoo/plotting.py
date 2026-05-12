@@ -319,6 +319,45 @@ def plot_calibration_by_snr(summary: pl.DataFrame, path: Path, title: str) -> No
     plt.close(fig)
 
 
+def plot_information_by_snr(summary: pl.DataFrame, overall: dict[str, float], path: Path, title: str) -> None:
+    x = summary["snr_bin_db"].to_numpy()
+    entropy = summary["label_entropy_bits"].to_numpy(allow_copy=True)
+    pred_mi = summary["pred_label_mi_bits"].to_numpy(allow_copy=True)
+    nll = summary["nll_bits"].to_numpy(allow_copy=True)
+    nll_mi = summary["mi_nll_lower_bound_bits"].to_numpy(allow_copy=True)
+    pred_frac = summary["pred_label_mi_fraction"].to_numpy(allow_copy=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        nll_frac = np.clip(nll_mi / entropy, 0.0, 1.0)
+
+    fig, (ax_bits, ax_frac) = plt.subplots(2, 1, figsize=(8, 6), gridspec_kw={"height_ratios": [2, 1]}, sharex=True)
+
+    ax_bits.plot(x, entropy, marker="o", color="#4C72B0", label="Label entropy")
+    ax_bits.plot(x, pred_mi, marker="s", color="#55A868", label="MI(true, pred)")
+    ax_bits.plot(x, nll_mi, marker="^", color="#8172B2", label="NLL MI lower bound")
+    ax_bits.plot(x, nll, marker="v", linestyle="--", color="#C44E52", label="NLL")
+    if np.isfinite(overall.get("label_entropy_bits", float("nan"))):
+        ax_bits.axhline(overall["label_entropy_bits"], color="0.35", linewidth=0.9, linestyle=":", label="Overall entropy")
+    ax_bits.set_ylabel("Bits")
+    ax_bits.set_title(f"{title} information diagnostics versus SNR")
+    ax_bits.grid(True, alpha=0.25)
+    ax_bits.legend(fontsize=8, loc="best")
+
+    ax_frac.plot(x, pred_frac, marker="s", color="#55A868", label="MI fraction")
+    ax_frac.plot(x, nll_frac, marker="^", color="#8172B2", label="NLL lower-bound fraction")
+    if np.isfinite(overall.get("pred_label_mi_fraction", float("nan"))):
+        ax_frac.axhline(overall["pred_label_mi_fraction"], color="0.35", linewidth=0.9, linestyle=":", label="Overall MI fraction")
+    ax_frac.set_xlabel("SNR bin start (dB)")
+    ax_frac.set_ylabel("Fraction")
+    ax_frac.set_ylim(0, 1)
+    ax_frac.grid(True, alpha=0.25)
+    ax_frac.legend(fontsize=8, loc="lower right")
+
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
 def plot_example_spectrograms(
     signals: np.ndarray,
     metadata: pl.DataFrame,
@@ -459,17 +498,27 @@ def plot_input_examples(
     plt.close(fig)
 
 
-def plot_accuracy_by_snr(summary: pl.DataFrame, path: Path, title: str) -> None:
+def plot_accuracy_by_snr(
+    summary: pl.DataFrame,
+    path: Path,
+    title: str,
+    overlays: dict[str, np.ndarray] | None = None,
+) -> None:
     x = summary["snr_bin_db"].to_numpy()
     y = summary["accuracy"].to_numpy()
     n = summary["n"].to_numpy()
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(x, y, marker="o")
+    ax.plot(x, y, marker="o", label="Empirical accuracy")
     for xi, yi, ni in zip(x, y, n):
         ax.text(xi, yi, str(int(ni)), fontsize=7, ha="center", va="bottom")
+    if overlays:
+        linestyles = ["--", ":"]
+        for ls, (label, yvals) in zip(linestyles, overlays.items()):
+            ax.plot(x[: len(yvals)], yvals[: len(x)], linestyle=ls, label=label)
+        ax.legend(fontsize=8)
     ax.set_title(f"{title} accuracy versus SNR")
     ax.set_xlabel("SNR bin start (dB)")
-    ax.set_ylabel("Accuracy")
+    ax.set_ylabel("Accuracy / fraction")
     ax.set_ylim(0, 1)
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
