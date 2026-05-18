@@ -319,7 +319,13 @@ def plot_calibration_by_snr(summary: pl.DataFrame, path: Path, title: str) -> No
     plt.close(fig)
 
 
-def plot_information_by_snr(summary: pl.DataFrame, overall: dict[str, float], path: Path, title: str) -> None:
+def plot_information_by_snr(
+    summary: pl.DataFrame,
+    overall: dict[str, float],
+    path: Path,
+    title: str,
+    fraction_overlays: dict[str, np.ndarray] | None = None,
+) -> None:
     x = summary["snr_bin_db"].to_numpy()
     entropy = summary["label_entropy_bits"].to_numpy(allow_copy=True)
     pred_mi = summary["pred_label_mi_bits"].to_numpy(allow_copy=True)
@@ -344,6 +350,9 @@ def plot_information_by_snr(summary: pl.DataFrame, overall: dict[str, float], pa
 
     ax_frac.plot(x, pred_frac, marker="s", color="#55A868", label="MI fraction")
     ax_frac.plot(x, nll_frac, marker="^", color="#8172B2", label="NLL lower-bound fraction")
+    if fraction_overlays:
+        for label, yvals in fraction_overlays.items():
+            ax_frac.plot(x[: len(yvals)], yvals[: len(x)], marker="o", linestyle="--", label=label)
     if np.isfinite(overall.get("pred_label_mi_fraction", float("nan"))):
         ax_frac.axhline(overall["pred_label_mi_fraction"], color="0.35", linewidth=0.9, linestyle=":", label="Overall MI fraction")
     ax_frac.set_xlabel("SNR bin start (dB)")
@@ -512,7 +521,7 @@ def plot_accuracy_by_snr(
     for xi, yi, ni in zip(x, y, n):
         ax.text(xi, yi, str(int(ni)), fontsize=7, ha="center", va="bottom")
     if overlays:
-        linestyles = ["--", ":"]
+        linestyles = ["--", "-.", ":", (0, (3, 1, 1, 1))]
         for ls, (label, yvals) in zip(linestyles, overlays.items()):
             ax.plot(x[: len(yvals)], yvals[: len(x)], linestyle=ls, label=label)
         ax.legend(fontsize=8)

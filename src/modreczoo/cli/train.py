@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from modreczoo.data import load_dataset, ordered_modulation_labels
+from modreczoo.oracle import build_oracle_cache
 from modreczoo.training import (
     CFO_SWEEP_MODES,
     CHANNEL_FORMATS,
@@ -26,10 +27,11 @@ from modreczoo.training import (
 def build_parser() -> ArgumentParser:
     parser = ArgumentParser(description="Train ModRec baselines.")
     parser.add_argument("--config", action="config")
-    parser.add_argument("--command", choices=("train", "sweep"), default="train")
+    parser.add_argument("--command", choices=("train", "sweep", "oracle-cache"), default="train")
     parser.add_argument("--experiment-name", default="modrec", help="MLflow experiment name.")
     parser.add_argument("--run-name", default=None, help="Override the auto-generated MLflow run name.")
     parser.add_argument("--dataset-dir", default="data/awgn_snr0_30")
+    parser.add_argument("--force-oracle-cache", action="store_true")
     parser.add_argument(
         "--test-dataset-dir",
         default=None,
@@ -123,6 +125,22 @@ def main() -> None:
     labels = ordered_modulation_labels(observed_labels)
     label_to_id = {label: idx for idx, label in enumerate(labels)}
     id_to_label = {idx: label for label, idx in label_to_id.items()}
+
+    if args.command == "oracle-cache":
+        result = build_oracle_cache(
+            args.dataset_dir,
+            train_signals,
+            train_metadata,
+            labels,
+            force=args.force_oracle_cache,
+            num_workers=args.num_workers,
+        )
+        print(
+            f"Wrote oracle cache for {result['row_count']} rows: "
+            f"{result['parquet_path']} and {result['json_path']} "
+            f"(accuracy={result['accuracy']:.4f})."
+        )
+        return
 
     full_train_labels = train_metadata["modulation"].to_numpy()
     train_dataset_idx = dataset_sample_indices(full_train_labels, args.sample_frac, args.max_examples, args.seed)
