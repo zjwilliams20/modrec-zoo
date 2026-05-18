@@ -513,7 +513,90 @@ def plot_accuracy_by_snr(
     title: str,
     overlays: dict[str, np.ndarray] | None = None,
 ) -> None:
-    x = summary["snr_bin_db"].to_numpy()
+    plot_accuracy_summary(
+        summary,
+        path,
+        title=f"{title} accuracy versus SNR",
+        x_col="snr_bin_db",
+        x_label="SNR bin start (dB)",
+        overlays=overlays,
+    )
+
+
+def plot_accuracy_by_osr(
+    summary: pl.DataFrame,
+    path: Path,
+    title: str,
+    overlays: dict[str, np.ndarray | pl.DataFrame] | None = None,
+) -> None:
+    if "snr_bin_db" in summary.columns:
+        plot_accuracy_by_osr_snr_levels(summary, path, title, overlays=overlays)
+        return
+    plot_accuracy_summary(
+        summary,
+        path,
+        title=f"{title} accuracy versus OSR",
+        x_col="osr",
+        x_label="OSR",
+        overlays=overlays,
+    )
+
+
+def plot_accuracy_by_osr_snr_levels(
+    summary: pl.DataFrame,
+    path: Path,
+    title: str,
+    overlays: dict[str, np.ndarray | pl.DataFrame] | None = None,
+) -> None:
+    snr_bins = summary["snr_bin_db"].unique().sort().to_list()
+    n_plots = len(snr_bins)
+    fig, axes = plt.subplots(1, n_plots, figsize=(4.2 * n_plots, 4), sharey=True, squeeze=False)
+    axes_flat = axes.ravel()
+
+    for ax, snr_bin in zip(axes_flat, snr_bins):
+        part = summary.filter(pl.col("snr_bin_db") == snr_bin).sort("osr")
+        x = part["osr"].to_numpy()
+        y = part["accuracy"].to_numpy()
+        n = part["n"].to_numpy()
+        ax.plot(x, y, marker="o", label="Empirical accuracy")
+        for xi, yi, ni in zip(x, y, n):
+            ax.text(xi, yi, str(int(ni)), fontsize=6, ha="center", va="bottom")
+        if overlays:
+            linestyles = ["--", "-.", ":", (0, (3, 1, 1, 1))]
+            for ls, (label, overlay_df) in zip(linestyles, overlays.items()):
+                overlay_part = overlay_df.filter(pl.col("snr_bin_db") == snr_bin).sort("osr")
+                if len(overlay_part) == 0:
+                    continue
+                ax.plot(
+                    overlay_part["osr"].to_numpy(),
+                    overlay_part["accuracy"].to_numpy(),
+                    linestyle=ls,
+                    label=label,
+                )
+        end = float(part["snr_bin_end_db"][0]) if len(part) else float(snr_bin)
+        ax.set_title(f"{float(snr_bin):g}-{end:g} dB")
+        ax.set_xlabel("OSR")
+        ax.set_ylim(0, 1)
+        ax.grid(True, alpha=0.25)
+
+    axes_flat[0].set_ylabel("Accuracy")
+    axes_flat[-1].legend(fontsize=8, loc="lower right")
+    fig.suptitle(f"{title} accuracy versus OSR by SNR", fontsize=11)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def plot_accuracy_summary(
+    summary: pl.DataFrame,
+    path: Path,
+    title: str,
+    x_col: str,
+    x_label: str,
+    overlays: dict[str, np.ndarray] | None = None,
+) -> None:
+    x = summary[x_col].to_numpy()
     y = summary["accuracy"].to_numpy()
     n = summary["n"].to_numpy()
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -525,8 +608,8 @@ def plot_accuracy_by_snr(
         for ls, (label, yvals) in zip(linestyles, overlays.items()):
             ax.plot(x[: len(yvals)], yvals[: len(x)], linestyle=ls, label=label)
         ax.legend(fontsize=8)
-    ax.set_title(f"{title} accuracy versus SNR")
-    ax.set_xlabel("SNR bin start (dB)")
+    ax.set_title(title)
+    ax.set_xlabel(x_label)
     ax.set_ylabel("Accuracy / fraction")
     ax.set_ylim(0, 1)
     ax.grid(True, alpha=0.25)

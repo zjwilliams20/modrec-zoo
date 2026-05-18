@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from modreczoo.data import get_data_loader
 from modreczoo.evaluation import (
+    accuracy_by_osr_snr_levels,
     accuracy_by_snr,
     bootstrap_accuracy,
     calibration_by_snr,
@@ -298,6 +299,13 @@ def train_one_model(
     test_metrics = evaluate(model, test_loader, device, len(label_to_id), desc="test")
     accuracy_bootstrap = bootstrap_accuracy(test_metrics["y_true"], test_metrics["y_pred"], seed=args.seed)
     snr_summary = accuracy_by_snr(test_metadata, test_idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
+    osr_summary = accuracy_by_osr_snr_levels(
+        test_metadata,
+        test_idx,
+        test_metrics["y_true"],
+        test_metrics["y_pred"],
+        SNR_BIN_WIDTH,
+    )
     info_summary = information_summary(test_metrics["confusion"], test_metrics["nll_bits"])
     info_snr_summary = information_by_snr(
         test_metadata,
@@ -315,10 +323,18 @@ def train_one_model(
         print(f"Skipping oracle metrics for {args.test_dataset_dir_effective}: {status}.")
 
     oracle_snr_summary = None
+    oracle_osr_summary = None
     oracle_info_summary = None
     oracle_info_snr_summary = None
     if oracle_metrics is not None:
         oracle_snr_summary = accuracy_by_snr(
+            test_metadata,
+            test_idx,
+            oracle_metrics["y_true"],
+            oracle_metrics["y_pred"],
+            SNR_BIN_WIDTH,
+        ).rename({"accuracy": "oracle_accuracy"})
+        oracle_osr_summary = accuracy_by_osr_snr_levels(
             test_metadata,
             test_idx,
             oracle_metrics["y_true"],
@@ -341,8 +357,11 @@ def train_one_model(
     confusion_path = artifact_dir / "confusion_matrix.png"
     snr_plot_path = artifact_dir / "accuracy_vs_snr.png"
     snr_csv_path = artifact_dir / "accuracy_vs_snr.csv"
+    osr_plot_path = artifact_dir / "accuracy_vs_osr.png"
+    osr_csv_path = artifact_dir / "accuracy_vs_osr.csv"
     ub_csv_path = artifact_dir / "union_bound_by_snr.csv"
     oracle_snr_csv_path = artifact_dir / "oracle_accuracy_by_snr.csv"
+    oracle_osr_csv_path = artifact_dir / "oracle_accuracy_by_osr.csv"
     oracle_info_summary_path = artifact_dir / "oracle_information_summary.csv"
     oracle_info_snr_path = artifact_dir / "oracle_information_by_snr.csv"
     class_csv_path = artifact_dir / "per_class_metrics.csv"
@@ -351,6 +370,7 @@ def train_one_model(
     info_snr_path = artifact_dir / "information_by_snr.csv"
     info_plot_path = artifact_dir / "information_by_snr.png"
     from modreczoo.plotting import (
+        plot_accuracy_by_osr,
         plot_accuracy_by_snr,
         plot_calibration_by_snr,
         plot_confusion_matrix,
@@ -374,6 +394,7 @@ def train_one_model(
         "Union bound (erfc)": ub_summary["union_bound_accuracy"].to_numpy(),
         "MI fraction (NLL lower bound)": mi_fraction,
     }
+    osr_overlays = {}
     fraction_overlays = None
     if oracle_metrics is not None:
         oracle_accuracy = (
@@ -392,11 +413,18 @@ def train_one_model(
             ["pred_label_mi_fraction"]
             .to_numpy()
         )
+        oracle_osr_overlay = (
+            oracle_osr_summary
+            .rename({"oracle_accuracy": "accuracy"})
+            .select(["snr_bin_db", "snr_bin_end_db", "osr", "n", "accuracy"])
+        )
         overlays["Oracle (known nuisance)"] = oracle_accuracy
+        osr_overlays["Oracle (known nuisance)"] = oracle_osr_overlay
         fraction_overlays = {"Oracle MI fraction": oracle_mi_fraction}
 
     plot_confusion_matrix(test_metrics["confusion"], labels_ordered, confusion_path, model_name)
     plot_accuracy_by_snr(snr_summary, snr_plot_path, model_name, overlays=overlays)
+    plot_accuracy_by_osr(osr_summary, osr_plot_path, model_name, overlays=osr_overlays or None)
     plot_information_by_snr(
         info_snr_summary,
         info_summary,
@@ -405,9 +433,11 @@ def train_one_model(
         fraction_overlays=fraction_overlays,
     )
     snr_summary.write_csv(snr_csv_path)
+    osr_summary.write_csv(osr_csv_path)
     ub_summary.write_csv(ub_csv_path)
     if oracle_metrics is not None:
         oracle_snr_summary.write_csv(oracle_snr_csv_path)
+        oracle_osr_summary.write_csv(oracle_osr_csv_path)
         pl.DataFrame([oracle_info_summary]).write_csv(oracle_info_summary_path)
         oracle_info_snr_summary.write_csv(oracle_info_snr_path)
     class_summary.write_csv(class_csv_path)
@@ -430,13 +460,16 @@ def train_one_model(
     calib_snr_df.write_csv(calib_snr_csv_path)
     mlflow.log_artifact(str(confusion_path), artifact_path="plots")
     mlflow.log_artifact(str(snr_plot_path), artifact_path="plots")
+    mlflow.log_artifact(str(osr_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(info_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(reliability_path), artifact_path="plots")
     mlflow.log_artifact(str(calib_snr_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(snr_csv_path), artifact_path="tables")
+    mlflow.log_artifact(str(osr_csv_path), artifact_path="tables")
     mlflow.log_artifact(str(ub_csv_path), artifact_path="tables")
     if oracle_metrics is not None:
         mlflow.log_artifact(str(oracle_snr_csv_path), artifact_path="tables")
+        mlflow.log_artifact(str(oracle_osr_csv_path), artifact_path="tables")
         mlflow.log_artifact(str(oracle_info_summary_path), artifact_path="tables")
         mlflow.log_artifact(str(oracle_info_snr_path), artifact_path="tables")
     mlflow.log_artifact(str(class_csv_path), artifact_path="tables")
@@ -464,6 +497,7 @@ def train_one_model(
         "test_mce": mce,
         "confusion": test_metrics["confusion"],
         "accuracy_by_snr": snr_summary,
+        "accuracy_by_osr": osr_summary,
         "information_summary": pl.DataFrame([info_summary]),
         "information_by_snr": info_snr_summary,
         "per_class_metrics": class_summary,

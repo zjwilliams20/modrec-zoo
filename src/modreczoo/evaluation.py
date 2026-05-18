@@ -134,6 +134,41 @@ def accuracy_by_snr(
     return pl.DataFrame(rows)
 
 
+def accuracy_by_osr_snr_levels(
+    metadata: pl.DataFrame,
+    test_idx: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    bin_width: float,
+    n_levels: int = 3,
+) -> pl.DataFrame:
+    snr = metadata[test_idx]["snr_db"].to_numpy()
+    osr = metadata[test_idx]["osr"].to_numpy()
+    snr_bins = np.floor(snr / bin_width) * bin_width
+    unique_bins = np.asarray(sorted(np.unique(snr_bins)), dtype=float)
+    if len(unique_bins) > n_levels:
+        pick = np.rint(np.linspace(0, len(unique_bins) - 1, n_levels)).astype(int)
+        selected_bins = unique_bins[pick]
+    else:
+        selected_bins = unique_bins
+
+    rows = []
+    for bin_start in selected_bins:
+        snr_mask = snr_bins == bin_start
+        for value in sorted(np.unique(osr[snr_mask])):
+            mask = snr_mask & (osr == value)
+            rows.append(
+                {
+                    "snr_bin_db": float(bin_start),
+                    "snr_bin_end_db": float(bin_start + bin_width),
+                    "osr": int(value),
+                    "n": int(np.sum(mask)),
+                    "accuracy": float(accuracy_score(y_true[mask], y_pred[mask])),
+                }
+            )
+    return pl.DataFrame(rows)
+
+
 def information_summary(confusion: np.ndarray, nll_bits: np.ndarray) -> Dict[str, float]:
     counts = np.asarray(confusion, dtype=np.float64)
     n = float(counts.sum())
@@ -385,6 +420,8 @@ def write_summary(
                 result["information_summary"].write_csv(),
                 "Accuracy versus SNR:",
                 result["accuracy_by_snr"].write_csv(),
+                "Accuracy versus OSR:",
+                result["accuracy_by_osr"].write_csv(),
                 "Information diagnostics versus SNR:",
                 result["information_by_snr"].write_csv(),
                 "Confusion matrix counts:",
