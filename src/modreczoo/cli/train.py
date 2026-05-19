@@ -41,8 +41,8 @@ def build_parser() -> ArgumentParser:
     )
     parser.add_argument(
         "--extra-test-dirs",
-        nargs="*",
-        default=[],
+        nargs="+",
+        default=None,
         help="Additional dataset directories evaluated after training, logged under their directory stem name.",
     )
     parser.add_argument(

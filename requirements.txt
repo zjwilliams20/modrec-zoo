@@ -3,6 +3,7 @@ scipy
 polars
 tqdm
 matplotlib
+plotly
 torch
 mlflow
 scikit-learn

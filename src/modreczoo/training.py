@@ -33,6 +33,7 @@ from modreczoo.evaluation import (
 )
 from modreczoo.models import make_model, representation_for_model, required_channel_format_for
 from modreczoo.oracle import load_oracle_cache, oracle_cache_status
+from modreczoo.reporting import build_prediction_table, error_slice_table, write_performance_explorer
 
 
 CFO_ESTIMATORS = ("lag_correlation", "phase_slope", "spectral_centroid")
@@ -209,6 +210,7 @@ def evaluate_and_log_test_set(
         plot_accuracy_by_snr,
         plot_calibration_by_snr,
         plot_confusion_matrix,
+        plot_dataset_metadata,
         plot_information_by_snr,
         plot_reliability_diagram,
     )
@@ -247,6 +249,7 @@ def evaluate_and_log_test_set(
 
     name_dir = artifact_dir / name
     name_dir.mkdir(parents=True, exist_ok=True)
+    metadata_plot_path = name_dir / "dataset_metadata.png"
     confusion_path = name_dir / "confusion_matrix.png"
     snr_plot_path = name_dir / "accuracy_vs_snr.png"
     snr_csv_path = name_dir / "accuracy_vs_snr.csv"
@@ -268,6 +271,9 @@ def evaluate_and_log_test_set(
     calib_csv_path = name_dir / "calibration_stats.csv"
     calib_snr_plot_path = name_dir / "calibration_by_snr.png"
     calib_snr_csv_path = name_dir / "calibration_by_snr.csv"
+    predictions_path = name_dir / "predictions.parquet"
+    error_slices_path = name_dir / "error_slices.csv"
+    explorer_path = name_dir / "performance_explorer.html"
 
     snr_bins = snr_summary["snr_bin_db"].to_numpy()
     ub_summary = union_bound_accuracy_by_snr(snr_bins, labels_ordered)
@@ -308,6 +314,7 @@ def evaluate_and_log_test_set(
         osr_overlays["Oracle (known nuisance)"] = oracle_osr_overlay
         fraction_overlays = {"Oracle MI fraction": oracle_mi_fraction}
 
+    plot_dataset_metadata(metadata, idx, metadata_plot_path, name)
     plot_confusion_matrix(test_metrics["confusion"], labels_ordered, confusion_path, name)
     plot_accuracy_by_snr(snr_summary, snr_plot_path, name, overlays=overlays)
     plot_accuracy_by_osr(osr_summary, osr_plot_path, name, overlays=osr_overlays or None)
@@ -336,9 +343,25 @@ def evaluate_and_log_test_set(
     plot_calibration_by_snr(calib_snr_df, calib_snr_plot_path, name)
     calib_df.write_csv(calib_csv_path)
     calib_snr_df.write_csv(calib_snr_csv_path)
+    predictions = build_prediction_table(metadata, idx, test_metrics, id_to_label, oracle_metrics=oracle_metrics)
+    min_slice_count = max(5, len(predictions) // 200)
+    error_slices = error_slice_table(predictions, min_count=min_slice_count)
+    predictions.write_parquet(predictions_path)
+    error_slices.write_csv(error_slices_path)
+    write_performance_explorer(
+        explorer_path,
+        name,
+        predictions,
+        error_slices,
+        test_metrics["confusion"],
+        labels_ordered,
+        {"accuracy": test_metrics["accuracy"], "ece": ece, "mce": mce},
+    )
 
     plots_path = f"plots/{name}"
     tables_path = f"tables/{name}"
+    reports_path = f"reports/{name}"
+    mlflow.log_artifact(str(metadata_plot_path), artifact_path=plots_path)
     mlflow.log_artifact(str(confusion_path), artifact_path=plots_path)
     mlflow.log_artifact(str(snr_plot_path), artifact_path=plots_path)
     mlflow.log_artifact(str(osr_plot_path), artifact_path=plots_path)
@@ -361,6 +384,9 @@ def evaluate_and_log_test_set(
     mlflow.log_artifact(str(info_snr_path), artifact_path=tables_path)
     mlflow.log_artifact(str(calib_csv_path), artifact_path=tables_path)
     mlflow.log_artifact(str(calib_snr_csv_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(predictions_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(error_slices_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(explorer_path), artifact_path=reports_path)
 
     mlflow.log_metric(f"{name}_accuracy", test_metrics["accuracy"])
     mlflow.log_metric(

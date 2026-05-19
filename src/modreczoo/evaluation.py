@@ -16,6 +16,7 @@ from tqdm import tqdm
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, n_classes: int, desc: str = "eval") -> Dict:
     model.eval()
     y_true, y_pred, y_conf, nll_bits = [], [], [], []
+    true_prob, top2_pred, top2_conf = [], [], []
     with torch.no_grad():
         for xb, yb in tqdm(loader, desc=desc, unit="batch", leave=False):
             yb_device = yb.to(device)
@@ -23,9 +24,16 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, n_class
             batch_nll_bits = F.cross_entropy(logits, yb_device, reduction="none") / np.log(2.0)
             probs = torch.softmax(logits, dim=1)
             conf, pred = probs.max(dim=1)
+            k = min(2, n_classes)
+            top_probs, top_idx = torch.topk(probs, k=k, dim=1)
+            second_pred = top_idx[:, 1] if k > 1 else top_idx[:, 0]
+            second_conf = top_probs[:, 1] if k > 1 else torch.zeros_like(top_probs[:, 0])
             nll_bits.extend(batch_nll_bits.cpu().tolist())
             y_conf.extend(conf.cpu().tolist())
             y_pred.extend(pred.cpu().tolist())
+            true_prob.extend(probs.gather(1, yb_device[:, None]).squeeze(1).cpu().tolist())
+            top2_pred.extend(second_pred.cpu().tolist())
+            top2_conf.extend(second_conf.cpu().tolist())
             y_true.extend(yb.tolist())
     y_true_np = np.asarray(y_true, dtype=int)
     y_pred_np = np.asarray(y_pred, dtype=int)
@@ -39,6 +47,9 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, n_class
         "y_pred": y_pred_np,
         "confidence": y_conf_np,
         "nll_bits": nll_bits_np,
+        "true_probability": np.asarray(true_prob, dtype=np.float32),
+        "top2_pred": np.asarray(top2_pred, dtype=int),
+        "top2_confidence": np.asarray(top2_conf, dtype=np.float32),
     }
 
 

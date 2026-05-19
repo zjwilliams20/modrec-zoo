@@ -633,3 +633,69 @@ def plot_accuracy_summary(
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
     plt.close(fig)
+
+
+_METADATA_PANELS: list[tuple[str, str, bool]] = [
+    # (column, x_label, is_categorical)
+    ("modulation",  "Modulation",       True),
+    ("channel",     "Channel",          True),
+    ("snr_db",      "SNR (dB)",         False),
+    ("osr",         "OSR",              False),
+    ("ebw",         "EBW",              False),
+    ("cfo",         "CFO",              False),
+    ("cpo",         "CPO",              False),
+    ("sto",         "STO (symbols)",    False),
+]
+
+
+def plot_dataset_metadata(
+    metadata: pl.DataFrame,
+    idx: np.ndarray,
+    path: Path,
+    title: str,
+    n_bins: int = 40,
+) -> None:
+    subset = metadata[idx]
+    panels = [(col, label, cat) for col, label, cat in _METADATA_PANELS if col in subset.columns]
+    panels = [
+        (col, label, cat) for col, label, cat in panels
+        if cat or subset[col].n_unique() > 1
+    ]
+    if not panels:
+        return
+
+    ncols = min(4, len(panels))
+    nrows = (len(panels) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 3.2, nrows * 2.6), squeeze=False)
+    fig.suptitle(f"{title} — dataset metadata (n={len(subset):,})", fontsize=11)
+
+    for panel_idx, (col, xlabel, is_cat) in enumerate(panels):
+        ax = axes[panel_idx // ncols][panel_idx % ncols]
+        values = subset[col].to_numpy()
+        if is_cat:
+            cats, counts = np.unique(values, return_counts=True)
+            order = np.argsort(-counts)
+            ax.bar(np.arange(len(cats)), counts[order], color="#4C72B0", alpha=0.8)
+            ax.set_xticks(np.arange(len(cats)))
+            ax.set_xticklabels(cats[order], rotation=30, ha="right", fontsize=7)
+            ax.set_ylabel("Count")
+        else:
+            finite = values[np.isfinite(values)]
+            if len(finite) == 0:
+                ax.axis("off")
+                ax.set_title(xlabel, fontsize=8)
+                continue
+            ax.hist(finite, bins=n_bins, color="#4C72B0", alpha=0.8, edgecolor="none")
+            ax.set_xlabel(xlabel, fontsize=8)
+            ax.set_ylabel("Count")
+        ax.set_title(xlabel, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        ax.tick_params(labelsize=7)
+
+    for unused in range(len(panels), nrows * ncols):
+        axes[unused // ncols][unused % ncols].axis("off")
+
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
