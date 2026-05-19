@@ -77,6 +77,28 @@ def test_oracle_accepts_dqpsk_alias() -> None:
     assert pred == "DQPSK"
 
 
+def test_oracle_handles_fractional_osr_metadata() -> None:
+    metadata = _metadata("4PSK", snr_db=35.0)
+    metadata.update({"upsample_factor": 5, "downsample_factor": 2, "osr": 2.5})
+    result = generate_signal(
+        modulation=metadata["modulation"],
+        snr_db=metadata["snr_db"],
+        cfo=metadata["cfo"],
+        cpo=metadata["cpo"],
+        sto=metadata["sto"],
+        upsample_factor=metadata["upsample_factor"],
+        downsample_factor=metadata["downsample_factor"],
+        ebw=metadata["ebw"],
+        n_samples=metadata["n_samples"],
+        channel=metadata["channel"],
+        rng=np.random.default_rng(21),
+    )
+
+    pred, _ = oracle_predict(result["signal"], metadata, modulations=("2PSK", "4PSK", "8PSK"))
+
+    assert pred == "4PSK"
+
+
 def test_evaluate_oracle_returns_confusion_and_accuracy() -> None:
     signals, rows = [], []
     for seed, modulation in enumerate(("2PSK", "8PSK", "16QAM", "MSK"), start=1):
@@ -144,6 +166,7 @@ if __name__ == "__main__":
     test_oracle_predicts_high_snr_awgn_modulations_without_bits()
     test_oracle_uses_nuisance_metadata()
     test_oracle_accepts_dqpsk_alias()
+    test_oracle_handles_fractional_osr_metadata()
     test_evaluate_oracle_returns_confusion_and_accuracy()
     with TemporaryDirectory() as tmp:
         test_oracle_cache_round_trip_loads_index_subset(Path(tmp))

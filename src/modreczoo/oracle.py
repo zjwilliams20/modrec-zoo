@@ -11,10 +11,10 @@ from scipy.special import logsumexp
 from sklearn.metrics import accuracy_score, confusion_matrix
 from tqdm import tqdm
 
-from modreczoo.simulation import MODEMS, MODULATIONS, srrc_filter
+from modreczoo.simulation import MODEMS, MODULATIONS, in_band_noise_fraction, srrc_filter
 
 
-ORACLE_CACHE_VERSION = 1
+ORACLE_CACHE_VERSION = 2
 ORACLE_CACHE_PARQUET = "oracle_predictions.parquet"
 ORACLE_CACHE_JSON = "oracle_predictions.json"
 
@@ -260,15 +260,23 @@ def _metadata_compensated_samples(
     metadata: dict,
     config: OracleConfig,
 ) -> list[np.ndarray]:
-    osr = int(metadata["osr"])
+    upsample_factor = int(metadata.get("upsample_factor", round(float(metadata["osr"]))))
+    downsample_factor = int(metadata.get("downsample_factor", 1))
+    osr = float(metadata.get("osr", upsample_factor / downsample_factor))
     x = _undo_channel(x, metadata)
     x = _undo_sto(x, float(metadata.get("sto", 0.0)), osr)
     x = _undo_cfo_cpo(x, float(metadata["cfo"]), float(metadata.get("cpo", 0.0)))
-    x = _matched_filter(x, osr, float(metadata["ebw"]), str(metadata["modulation"]))
+    x = _matched_filter(
+        x,
+        upsample_factor,
+        downsample_factor,
+        float(metadata["ebw"]),
+        str(metadata["modulation"]),
+    )
 
     sampled = []
-    for offset in range(osr):
-        symbols = x[offset::osr]
+    for offset in range(upsample_factor):
+        symbols = x[offset::upsample_factor]
         if len(symbols) > 2 * config.edge_symbols:
             symbols = symbols[config.edge_symbols : -config.edge_symbols]
         if len(symbols):
@@ -304,7 +312,7 @@ def _undo_cfo_cpo(x: np.ndarray, cfo: float, cpo: float) -> np.ndarray:
     return x * np.exp(-1j * 2 * np.pi * (cfo * n + cpo))
 
 
-def _undo_sto(x: np.ndarray, sto_symbols: float, osr: int) -> np.ndarray:
+def _undo_sto(x: np.ndarray, sto_symbols: float, osr: float) -> np.ndarray:
     if abs(sto_symbols) < 1e-12:
         return x
     n = np.arange(len(x))
@@ -314,10 +322,18 @@ def _undo_sto(x: np.ndarray, sto_symbols: float, osr: int) -> np.ndarray:
     return real + 1j * imag
 
 
-def _matched_filter(x: np.ndarray, osr: int, ebw: float, modulation: str) -> np.ndarray:
+def _matched_filter(
+    x: np.ndarray,
+    upsample_factor: int,
+    downsample_factor: int,
+    ebw: float,
+    modulation: str,
+) -> np.ndarray:
+    if downsample_factor > 1:
+        x = signal.resample_poly(x, downsample_factor, 1)
     if modulation == "MSK":
         return x
-    taps = srrc_filter(osr, ebw)
+    taps = srrc_filter(upsample_factor, ebw)
     return signal.convolve(x, taps[::-1], mode="same")
 
 
@@ -327,7 +343,9 @@ def _unit_power(x: np.ndarray) -> np.ndarray:
 
 def _symbol_noise_variance(metadata: dict, config: OracleConfig) -> float:
     snr_linear = 10 ** (float(metadata["snr_db"]) / 10)
-    return max(1.0 / snr_linear, config.min_noise_variance)
+    osr = float(metadata.get("osr", float(metadata.get("upsample_factor", 1)) / float(metadata.get("downsample_factor", 1))))
+    ebw = float(metadata.get("ebw", 1.0))
+    return max(1.0 / (snr_linear * in_band_noise_fraction(osr, ebw)), config.min_noise_variance)
 
 
 def _modulation_log_likelihood(samples_by_offset: list[np.ndarray], modulation: str, noise_variance: float) -> float:
