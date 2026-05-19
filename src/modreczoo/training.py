@@ -180,6 +180,15 @@ def stratified_subset_indices(labels: np.ndarray, target: int, seed: int) -> np.
     return selected
 
 
+def pad_or_trim_signals(signals: np.ndarray, n_samples: int) -> np.ndarray:
+    if signals.shape[1] == n_samples:
+        return signals
+    if signals.shape[1] > n_samples:
+        return signals[:, :n_samples]
+    pad_width = ((0, 0), (0, n_samples - signals.shape[1]))
+    return np.pad(signals, pad_width, mode="constant")
+
+
 def train_one_model(
     args: argparse.Namespace,
     model_name: str,
@@ -727,7 +736,8 @@ def log_common_params(
             "seed": args.seed,
             "n_samples": train_signals.shape[1],
             "train_n_samples": train_signals.shape[1],
-            "test_n_samples": test_signals.shape[1],
+            "test_n_samples": getattr(args, "test_n_samples_original", test_signals.shape[1]),
+            "test_effective_n_samples": test_signals.shape[1],
             "n_examples": args.n_train_dataset_examples_used,
             "n_examples_available": args.n_train_dataset_examples_available,
             "n_train_dataset_examples_available": args.n_train_dataset_examples_available,
@@ -776,6 +786,14 @@ def run_config(
     sweep_total: int,
     config_yaml: Optional[str] = None,
 ) -> None:
+    test_n_samples_original = test_signals.shape[1]
+    test_signals = pad_or_trim_signals(test_signals, train_signals.shape[1])
+    args.test_n_samples_original = test_n_samples_original
+    if test_n_samples_original != test_signals.shape[1]:
+        print(
+            f"Adjusted test signal length from {test_n_samples_original} "
+            f"to train length {test_signals.shape[1]}."
+        )
     with mlflow.start_run(run_name=run_name_for(args, model_name)) as run:
         log_common_params(args, model_name, train_signals, test_signals, labels, sweep_index, sweep_total)
         if config_yaml is not None:
