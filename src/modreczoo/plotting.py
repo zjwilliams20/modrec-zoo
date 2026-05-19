@@ -523,6 +523,22 @@ def plot_accuracy_by_snr(
     )
 
 
+def plot_accuracy_by_ebw(
+    summary: pl.DataFrame,
+    path: Path,
+    title: str,
+    overlays: dict[str, np.ndarray] | None = None,
+) -> None:
+    plot_accuracy_summary(
+        summary,
+        path,
+        title=f"{title} accuracy versus EBW",
+        x_col="ebw_bin",
+        x_label="EBW bin start",
+        overlays=overlays,
+    )
+
+
 def plot_accuracy_by_osr(
     summary: pl.DataFrame,
     path: Path,

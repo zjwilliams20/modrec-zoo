@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from modreczoo.data import get_data_loader
 from modreczoo.evaluation import (
+    accuracy_by_ebw,
     accuracy_by_osr_snr_levels,
     accuracy_by_snr,
     bootstrap_accuracy,
@@ -306,6 +307,7 @@ def train_one_model(
         test_metrics["y_pred"],
         SNR_BIN_WIDTH,
     )
+    ebw_summary = accuracy_by_ebw(test_metadata, test_idx, test_metrics["y_true"], test_metrics["y_pred"])
     info_summary = information_summary(test_metrics["confusion"], test_metrics["nll_bits"])
     info_snr_summary = information_by_snr(
         test_metadata,
@@ -359,6 +361,8 @@ def train_one_model(
     snr_csv_path = artifact_dir / "accuracy_vs_snr.csv"
     osr_plot_path = artifact_dir / "accuracy_vs_osr.png"
     osr_csv_path = artifact_dir / "accuracy_vs_osr.csv"
+    ebw_plot_path = artifact_dir / "accuracy_vs_ebw.png"
+    ebw_csv_path = artifact_dir / "accuracy_vs_ebw.csv"
     ub_csv_path = artifact_dir / "union_bound_by_snr.csv"
     oracle_snr_csv_path = artifact_dir / "oracle_accuracy_by_snr.csv"
     oracle_osr_csv_path = artifact_dir / "oracle_accuracy_by_osr.csv"
@@ -370,6 +374,7 @@ def train_one_model(
     info_snr_path = artifact_dir / "information_by_snr.csv"
     info_plot_path = artifact_dir / "information_by_snr.png"
     from modreczoo.plotting import (
+        plot_accuracy_by_ebw,
         plot_accuracy_by_osr,
         plot_accuracy_by_snr,
         plot_calibration_by_snr,
@@ -425,6 +430,7 @@ def train_one_model(
     plot_confusion_matrix(test_metrics["confusion"], labels_ordered, confusion_path, model_name)
     plot_accuracy_by_snr(snr_summary, snr_plot_path, model_name, overlays=overlays)
     plot_accuracy_by_osr(osr_summary, osr_plot_path, model_name, overlays=osr_overlays or None)
+    plot_accuracy_by_ebw(ebw_summary, ebw_plot_path, model_name)
     plot_information_by_snr(
         info_snr_summary,
         info_summary,
@@ -434,6 +440,7 @@ def train_one_model(
     )
     snr_summary.write_csv(snr_csv_path)
     osr_summary.write_csv(osr_csv_path)
+    ebw_summary.write_csv(ebw_csv_path)
     ub_summary.write_csv(ub_csv_path)
     if oracle_metrics is not None:
         oracle_snr_summary.write_csv(oracle_snr_csv_path)
@@ -461,11 +468,13 @@ def train_one_model(
     mlflow.log_artifact(str(confusion_path), artifact_path="plots")
     mlflow.log_artifact(str(snr_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(osr_plot_path), artifact_path="plots")
+    mlflow.log_artifact(str(ebw_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(info_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(reliability_path), artifact_path="plots")
     mlflow.log_artifact(str(calib_snr_plot_path), artifact_path="plots")
     mlflow.log_artifact(str(snr_csv_path), artifact_path="tables")
     mlflow.log_artifact(str(osr_csv_path), artifact_path="tables")
+    mlflow.log_artifact(str(ebw_csv_path), artifact_path="tables")
     mlflow.log_artifact(str(ub_csv_path), artifact_path="tables")
     if oracle_metrics is not None:
         mlflow.log_artifact(str(oracle_snr_csv_path), artifact_path="tables")

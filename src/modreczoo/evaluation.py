@@ -134,6 +134,29 @@ def accuracy_by_snr(
     return pl.DataFrame(rows)
 
 
+def accuracy_by_ebw(
+    metadata: pl.DataFrame,
+    test_idx: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    bin_width: float = 0.1,
+) -> pl.DataFrame:
+    ebw = metadata[test_idx]["ebw"].to_numpy()
+    bins = np.round(np.floor(ebw / bin_width) * bin_width, 10)
+    rows = []
+    for bin_start in sorted(np.unique(bins)):
+        mask = bins == bin_start
+        rows.append(
+            {
+                "ebw_bin": float(bin_start),
+                "ebw_bin_end": float(bin_start + bin_width),
+                "n": int(np.sum(mask)),
+                "accuracy": float(accuracy_score(y_true[mask], y_pred[mask])),
+            }
+        )
+    return pl.DataFrame(rows)
+
+
 def accuracy_by_osr_snr_levels(
     metadata: pl.DataFrame,
     test_idx: np.ndarray,
