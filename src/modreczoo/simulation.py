@@ -549,12 +549,12 @@ def sample_parameter_design(
         raise ValueError(f"Unsupported sampler: {sampler}")
 
     labels = balanced_modulation_labels(n_signals, modulations, rng)
+    osr_pairs = osr_factor_pairs(params["upsample_factor_range"], params["downsample_factor_range"])
     rows = []
     for i in range(n_signals):
         u = unit[i]
-        upsample_factor = max(2, scale_int(u[4], params["upsample_factor_range"]))
-        downsample_factor = max(1, scale_int(u[5], params["downsample_factor_range"]))
-        downsample_factor = min(downsample_factor, upsample_factor - 1)
+        osr, pairs = osr_pairs[scale_int(u[4], (0, len(osr_pairs)))]
+        upsample_factor, downsample_factor = pairs[scale_int(u[5], (0, len(pairs)))]
         rows.append(
             {
                 "modulation": labels[i],
@@ -573,6 +573,23 @@ def sample_parameter_design(
             }
         )
     return rows
+
+
+def osr_factor_pairs(
+    upsample_factor_range: Tuple[int, int],
+    downsample_factor_range: Tuple[int, int],
+) -> List[Tuple[float, List[Tuple[int, int]]]]:
+    up_low, up_high = upsample_factor_range
+    down_low, down_high = downsample_factor_range
+    pairs_by_osr: Dict[float, List[Tuple[int, int]]] = {}
+    for up in range(max(2, up_low), up_high):
+        for down in range(max(1, down_low), down_high):
+            if up / down <= 1:
+                continue
+            pairs_by_osr.setdefault(up / down, []).append((up, down))
+    if not pairs_by_osr:
+        raise ValueError("upsample/downsample factor ranges produce no valid up/down > 1 ratios.")
+    return sorted(pairs_by_osr.items(), key=lambda item: item[0])
 
 
 def balanced_modulation_labels(n_signals: int, modulations: Tuple[str, ...], rng: np.random.Generator) -> np.ndarray:

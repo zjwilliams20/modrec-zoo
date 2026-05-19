@@ -6,6 +6,7 @@ from modreczoo.simulation import (
     generate_dataset,
     generate_symbols,
     in_band_noise_fraction,
+    osr_factor_pairs,
     rng_from_seed,
     sample_parameter_design,
 )
@@ -21,6 +22,27 @@ def test_parameter_design_samples_rational_osr_above_one() -> None:
     assert all(row["upsample_factor"] / row["downsample_factor"] > 1 for row in rows)
     assert all(row["osr"] == row["upsample_factor"] / row["downsample_factor"] for row in rows)
     assert any(not float(row["osr"]).is_integer() for row in rows)
+
+
+def test_parameter_design_samples_unique_osr_values_uniformly() -> None:
+    params = dict(DEFAULT_PARAMS)
+    params.update(
+        {
+            "seed": 11,
+            "sampler": "sobol",
+            "upsample_factor_range": (2, 7),
+            "downsample_factor_range": (1, 6),
+        }
+    )
+    rows = sample_parameter_design(512, ("2PSK",), params, rng_from_seed(11))
+    ratios = [ratio for ratio, _ in osr_factor_pairs(params["upsample_factor_range"], params["downsample_factor_range"])]
+    counts = {ratio: 0 for ratio in ratios}
+    for row in rows:
+        counts[row["osr"]] += 1
+
+    values = np.asarray(list(counts.values()))
+    assert len(counts) < sum(len(pairs) for _, pairs in osr_factor_pairs(params["upsample_factor_range"], params["downsample_factor_range"]))
+    assert values.max() - values.min() <= 2
 
 
 def test_apply_pulse_shape_resamples_in_one_step_and_skips_srrc_for_msk() -> None:
@@ -85,6 +107,7 @@ def test_generate_dataset_metadata_includes_up_down_and_float_osr() -> None:
 
 if __name__ == "__main__":
     test_parameter_design_samples_rational_osr_above_one()
+    test_parameter_design_samples_unique_osr_values_uniformly()
     test_apply_pulse_shape_resamples_in_one_step_and_skips_srrc_for_msk()
     test_apply_pulse_shape_requires_real_oversampling()
     test_in_band_noise_fraction_uses_srrc_bandwidth()
