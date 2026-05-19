@@ -38,7 +38,7 @@ def test_accuracy_by_osr_snr_levels_picks_low_mid_high_bins() -> None:
         metadata=pl.DataFrame(
             {
                 "snr_db": [0.0, 0.5, 4.0, 4.5, 8.0, 8.5, 12.0, 12.5],
-                "osr": [1, 2, 1, 2, 1, 2, 1, 2],
+                "osr": [1.5, 2.5, 1.5, 2.5, 1.5, 2.5, 1.5, 2.5],
             }
         ),
         test_idx=np.arange(8),
@@ -47,7 +47,7 @@ def test_accuracy_by_osr_snr_levels_picks_low_mid_high_bins() -> None:
         bin_width=4.0,
     )
     assert df["snr_bin_db"].unique().sort().to_list() == [0.0, 8.0, 12.0]
-    assert df["osr"].to_list() == [1, 2, 1, 2, 1, 2]
+    assert df["osr"].to_list() == [1.5, 2.5, 1.5, 2.5, 1.5, 2.5]
     assert df["accuracy"].to_list() == [1.0, 0.0, 1.0, 1.0, 1.0, 0.0]
 
 

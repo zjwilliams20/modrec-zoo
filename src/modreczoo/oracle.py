@@ -264,7 +264,7 @@ def _metadata_compensated_samples(
     x = _undo_channel(x, metadata)
     x = _undo_sto(x, float(metadata.get("sto", 0.0)), osr)
     x = _undo_cfo_cpo(x, float(metadata["cfo"]), float(metadata.get("cpo", 0.0)))
-    x = _matched_filter(x, osr, float(metadata["ebw"]))
+    x = _matched_filter(x, osr, float(metadata["ebw"]), str(metadata["modulation"]))
 
     sampled = []
     for offset in range(osr):
@@ -314,7 +314,9 @@ def _undo_sto(x: np.ndarray, sto_symbols: float, osr: int) -> np.ndarray:
     return real + 1j * imag
 
 
-def _matched_filter(x: np.ndarray, osr: int, ebw: float) -> np.ndarray:
+def _matched_filter(x: np.ndarray, osr: int, ebw: float, modulation: str) -> np.ndarray:
+    if modulation == "MSK":
+        return x
     taps = srrc_filter(osr, ebw)
     return signal.convolve(x, taps[::-1], mode="same")
 

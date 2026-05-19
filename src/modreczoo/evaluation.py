@@ -161,7 +161,7 @@ def accuracy_by_osr_snr_levels(
                 {
                     "snr_bin_db": float(bin_start),
                     "snr_bin_end_db": float(bin_start + bin_width),
-                    "osr": int(value),
+                    "osr": float(value),
                     "n": int(np.sum(mask)),
                     "accuracy": float(accuracy_score(y_true[mask], y_pred[mask])),
                 }

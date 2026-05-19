@@ -1,4 +1,3 @@
-import functools
 import json
 import math
 from concurrent.futures import ProcessPoolExecutor
@@ -23,7 +22,8 @@ DEFAULT_PARAMS = {
     "cfo_range": (-1 / 1000, 1 / 1000),  # cycles per sample
     "cpo_range": (0.0, 1.0),  # cycles
     "sto_range": (-1 / 2, 1 / 2),  # symbols
-    "osr_range": (1, 21),  # integer samples per symbol, high endpoint is exclusive
+    "upsample_factor_range": (2, 11),  # high endpoint is exclusive
+    "downsample_factor_range": (1, 10),  # high endpoint is exclusive; clipped so up/down > 1
     "ebw_range": (0.1, 1.0),  # SRRC excess bandwidth
     "channel": "awgn",
     "rician_k_range": (3.0, 12.0),  # dB
@@ -189,7 +189,6 @@ def modulate_msk(bits: np.ndarray) -> np.ndarray:
     return np.exp(1j * phase)
 
 
-@functools.lru_cache(maxsize=64)
 def srrc_filter(samples_per_symbol: int, beta: float, span_symbols: int = 8) -> np.ndarray:
     if samples_per_symbol < 1:
         raise ValueError("samples_per_symbol must be at least 1.")
@@ -216,10 +215,32 @@ def srrc_filter(samples_per_symbol: int, beta: float, span_symbols: int = 8) -> 
     return h / np.sqrt(np.sum(h**2))
 
 
-def apply_srrc_filter(symbols: np.ndarray, osr: int, ebw: float) -> np.ndarray:
-    taps = srrc_filter(osr, ebw)
-    upsampled = signal.upfirdn([1.0], symbols, up=osr)
-    return signal.convolve(upsampled, taps, mode="same")
+def trim_filter_delay(x: np.ndarray, n_taps: int, downsample_factor: int) -> np.ndarray:
+    delay_samples = (n_taps - 1) / 2
+    start = int(round(delay_samples / downsample_factor))
+    return x[start:] if start > 0 else x
+
+
+def apply_pulse_shape(
+    symbols: np.ndarray,
+    modulation: str,
+    upsample_factor: int,
+    downsample_factor: int,
+    ebw: float,
+) -> np.ndarray:
+    if upsample_factor < 2:
+        raise ValueError("upsample_factor must be at least 2.")
+    if downsample_factor < 1:
+        raise ValueError("downsample_factor must be at least 1.")
+    if upsample_factor / downsample_factor <= 1:
+        raise ValueError("upsample_factor / downsample_factor must be greater than 1.")
+
+    if modulation == "MSK":
+        taps = np.ones(upsample_factor, dtype=float)
+    else:
+        taps = srrc_filter(upsample_factor, ebw)
+    shaped = signal.upfirdn(taps, symbols, up=upsample_factor, down=downsample_factor)
+    return normalize_power(trim_filter_delay(shaped, len(taps), downsample_factor))
 
 
 def apply_cfo(x: np.ndarray, cfo: float, cpo: float = 0.0) -> np.ndarray:
@@ -227,7 +248,7 @@ def apply_cfo(x: np.ndarray, cfo: float, cpo: float = 0.0) -> np.ndarray:
     return x * np.exp(1j * 2 * np.pi * (cfo * n + cpo))
 
 
-def apply_sto(x: np.ndarray, sto_symbols: float, osr: int) -> np.ndarray:
+def apply_sto(x: np.ndarray, sto_symbols: float, osr: float) -> np.ndarray:
     if abs(sto_symbols) < 1e-12:
         return x
     n = np.arange(len(x))
@@ -237,17 +258,19 @@ def apply_sto(x: np.ndarray, sto_symbols: float, osr: int) -> np.ndarray:
     return real + 1j * imag
 
 
-def add_awgn(x: np.ndarray, snr_db: float, rng: np.random.Generator, osr: int = 1) -> np.ndarray:
+def in_band_noise_fraction(osr: float, ebw: float) -> float:
+    return float(min(1.0, (1.0 + ebw) / max(float(osr), 1e-12)))
+
+
+def add_awgn(x: np.ndarray, snr_db: float, rng: np.random.Generator, osr: float = 1.0, ebw: float = 1.0) -> np.ndarray:
     """Add complex AWGN for an in-band SNR target.
 
-    The pulse-shaped signal is oversampled, so its time-average sample power is
-    diluted by roughly osr relative to matched-filter symbol energy. To express
-    SNR in the signal band rather than across the full sampled bandwidth, the
-    per-sample complex noise variance scales by osr.
+    SRRC one-sided bandwidth is (1 + beta) / (2T), so the complex two-sided
+    in-band fraction of the sampled spectrum is roughly (1 + beta) / osr.
     """
     power = np.mean(np.abs(x) ** 2)
     snr_linear = 10 ** (snr_db / 10)
-    noise_power = power * osr / snr_linear
+    noise_power = power / (snr_linear * in_band_noise_fraction(osr, ebw))
     noise = np.sqrt(noise_power / 2) * (rng.standard_normal(len(x)) + 1j * rng.standard_normal(len(x)))
     return x + noise
 
@@ -256,7 +279,7 @@ def apply_channel(
     x: np.ndarray,
     channel: str,
     rng: np.random.Generator,
-    osr: int,
+    osr: float,
     rician_k_db: Optional[float] = None,
     n_taps: int = 4,
     delay_spread_symbols: float = 2.0,
@@ -298,7 +321,7 @@ def apply_channel(
 
 def fading_taps(
     rng: np.random.Generator,
-    osr: int,
+    osr: float,
     n_taps: int,
     delay_spread_symbols: float,
     delay_decay_symbols: float,
@@ -369,7 +392,8 @@ def generate_signal(
     snr_db: float,
     cfo: float,
     sto: float,
-    osr: int,
+    upsample_factor: int,
+    downsample_factor: int,
     ebw: float,
     cpo: float = 0.0,
     n_samples: int = 32768,
@@ -383,10 +407,11 @@ def generate_signal(
     debug: bool = False,
 ) -> Dict:
     rng = rng if rng is not None else rng_from_seed(None)
+    osr = upsample_factor / downsample_factor
     n_symbols = int(math.ceil(n_samples / osr)) + 16
     symbols, bits = generate_symbols(modulation, n_symbols, rng)
 
-    shaped = pad_or_trim(apply_srrc_filter(symbols, osr, ebw), n_samples)
+    shaped = pad_or_trim(apply_pulse_shape(symbols, modulation, upsample_factor, downsample_factor, ebw), n_samples)
     shifted = apply_cfo(shaped, cfo, cpo=cpo)
     shifted = apply_sto(shifted, sto, osr)
     faded, channel_metadata = apply_channel(
@@ -399,7 +424,7 @@ def generate_signal(
         delay_spread_symbols=delay_spread_symbols,
         delay_decay_symbols=delay_decay_symbols,
     )
-    received = add_awgn(faded, snr_db, rng, osr=osr)
+    received = add_awgn(faded, snr_db, rng, osr=osr, ebw=ebw)
 
     metadata = {
         "signal_id": signal_id,
@@ -408,7 +433,9 @@ def generate_signal(
         "cfo": float(cfo),
         "cpo": float(cpo),
         "sto": float(sto),
-        "osr": int(osr),
+        "upsample_factor": int(upsample_factor),
+        "downsample_factor": int(downsample_factor),
+        "osr": float(osr),
         "ebw": float(ebw),
         "n_samples": int(n_samples),
         "n_symbols": int(n_symbols),
@@ -482,7 +509,8 @@ def _generate_dataset_signal(
             snr_db=row["snr_db"],
             cfo=row["cfo"],
             sto=row["sto"],
-            osr=row["osr"],
+            upsample_factor=row["upsample_factor"],
+            downsample_factor=row["downsample_factor"],
             ebw=row["ebw"],
             cpo=row["cpo"],
             n_samples=int(params["n_samples"]),
@@ -513,10 +541,10 @@ def sample_parameter_design(
     sampler = params.get("sampler", "sobol")
     if sampler == "sobol":
         seed = params.get("seed")
-        sobol = qmc.Sobol(d=10, scramble=True, seed=seed)
+        sobol = qmc.Sobol(d=11, scramble=True, seed=seed)
         unit = sobol.random(n_signals)
     elif sampler == "random":
-        unit = rng.random((n_signals, 10))
+        unit = rng.random((n_signals, 11))
     else:
         raise ValueError(f"Unsupported sampler: {sampler}")
 
@@ -524,6 +552,9 @@ def sample_parameter_design(
     rows = []
     for i in range(n_signals):
         u = unit[i]
+        upsample_factor = max(2, scale_int(u[4], params["upsample_factor_range"]))
+        downsample_factor = max(1, scale_int(u[5], params["downsample_factor_range"]))
+        downsample_factor = min(downsample_factor, upsample_factor - 1)
         rows.append(
             {
                 "modulation": labels[i],
@@ -531,12 +562,14 @@ def sample_parameter_design(
                 "cfo": scale_float(u[1], params["cfo_range"]),
                 "cpo": scale_float(u[2], params["cpo_range"]),
                 "sto": scale_float(u[3], params["sto_range"]),
-                "osr": scale_int(u[4], params["osr_range"]),
-                "ebw": scale_float(u[5], params["ebw_range"]),
-                "rician_k_db": scale_float(u[6], params["rician_k_range"]),
-                "n_taps": scale_int(u[7], params["n_taps_range"]),
-                "delay_spread_symbols": scale_float(u[8], params["delay_spread_symbols_range"]),
-                "delay_decay_symbols": scale_float(u[9], params["delay_decay_symbols_range"]),
+                "upsample_factor": upsample_factor,
+                "downsample_factor": downsample_factor,
+                "osr": float(upsample_factor / downsample_factor),
+                "ebw": scale_float(u[6], params["ebw_range"]),
+                "rician_k_db": scale_float(u[7], params["rician_k_range"]),
+                "n_taps": scale_int(u[8], params["n_taps_range"]),
+                "delay_spread_symbols": scale_float(u[9], params["delay_spread_symbols_range"]),
+                "delay_decay_symbols": scale_float(u[10], params["delay_decay_symbols_range"]),
             }
         )
     return rows

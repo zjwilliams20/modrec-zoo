@@ -42,7 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--cfo-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["cfo_range"])
     generate.add_argument("--cpo-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["cpo_range"])
     generate.add_argument("--sto-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["sto_range"])
-    generate.add_argument("--osr-range", type=lambda v: parse_range(v, int), default=DEFAULT_PARAMS["osr_range"])
+    generate.add_argument(
+        "--upsample-factor-range",
+        type=lambda v: parse_range(v, int),
+        default=DEFAULT_PARAMS["upsample_factor_range"],
+    )
+    generate.add_argument(
+        "--downsample-factor-range",
+        type=lambda v: parse_range(v, int),
+        default=DEFAULT_PARAMS["downsample_factor_range"],
+    )
     generate.add_argument("--ebw-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["ebw_range"])
     generate.add_argument("--channel", choices=("awgn", "rayleigh", "rician", "soft_limiter"), default=DEFAULT_PARAMS["channel"])
     generate.add_argument("--sampler", choices=("sobol", "random"), default=DEFAULT_PARAMS["sampler"])
@@ -96,7 +105,8 @@ def main() -> None:
                 "cfo_range": args.cfo_range,
                 "cpo_range": args.cpo_range,
                 "sto_range": args.sto_range,
-                "osr_range": args.osr_range,
+                "upsample_factor_range": args.upsample_factor_range,
+                "downsample_factor_range": args.downsample_factor_range,
                 "ebw_range": args.ebw_range,
                 "channel": args.channel,
                 "sampler": args.sampler,

@@ -11,7 +11,7 @@ import polars as pl
 
 from modreczoo.simulation import (
     MODEMS,
-    apply_srrc_filter,
+    apply_pulse_shape,
     ber_sweep,
     generate_symbols,
     rng_from_seed,
@@ -61,7 +61,7 @@ def plot_modulation_summary(
     seed: Optional[int],
 ) -> plt.Figure:
     symbols, _ = generate_symbols(modulation, k_symbols, rng)
-    waveform = apply_srrc_filter(symbols, osr, ebw)
+    waveform = apply_pulse_shape(symbols, modulation, osr, 1, ebw)
     waveform = waveform[: k_symbols * osr]
     freq, spectrum_db = normalized_spectrum(waveform)
 
