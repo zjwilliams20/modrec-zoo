@@ -62,7 +62,7 @@ def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str])
     )
 
 
-def log_f1_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]) -> None:
+def log_f1_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str], prefix: str = "") -> None:
     label_ids = np.arange(len(labels))
     _, _, f1, _ = precision_recall_fscore_support(
         y_true,
@@ -71,7 +71,7 @@ def log_f1_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]) ->
         average="macro",
         zero_division=0,
     )
-    mlflow.log_metric("macro_f1", float(f1))
+    mlflow.log_metric(f"{prefix}macro_f1", float(f1))
 
 
 def bootstrap_accuracy(

@@ -189,6 +189,204 @@ def pad_or_trim_signals(signals: np.ndarray, n_samples: int) -> np.ndarray:
     return np.pad(signals, pad_width, mode="constant")
 
 
+def evaluate_and_log_test_set(
+    name: str,
+    model: torch.nn.Module,
+    signals: np.ndarray,
+    metadata: pl.DataFrame,
+    idx: np.ndarray,
+    label_to_id: Dict[str, int],
+    id_to_label: Dict[int, str],
+    loader_kwargs: Dict,
+    artifact_dir: Path,
+    dataset_dir: str,
+    seed: int,
+    device: torch.device,
+) -> Dict:
+    from modreczoo.plotting import (
+        plot_accuracy_by_ebw,
+        plot_accuracy_by_osr,
+        plot_accuracy_by_snr,
+        plot_calibration_by_snr,
+        plot_confusion_matrix,
+        plot_information_by_snr,
+        plot_reliability_diagram,
+    )
+    labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
+    loader = get_data_loader(signals, metadata, idx, label_to_id, shuffle=False, **loader_kwargs)
+    test_metrics = evaluate(model, loader, device, len(label_to_id), desc=name)
+    accuracy_bootstrap = bootstrap_accuracy(test_metrics["y_true"], test_metrics["y_pred"], seed=seed)
+    snr_summary = accuracy_by_snr(metadata, idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
+    osr_summary = accuracy_by_osr_snr_levels(metadata, idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
+    ebw_summary = accuracy_by_ebw(metadata, idx, test_metrics["y_true"], test_metrics["y_pred"])
+    info_summary_dict = information_summary(test_metrics["confusion"], test_metrics["nll_bits"])
+    info_snr_summary = information_by_snr(
+        metadata, idx, test_metrics["y_true"], test_metrics["y_pred"],
+        test_metrics["nll_bits"], len(label_to_id), SNR_BIN_WIDTH,
+    )
+    oracle_metrics = load_oracle_cache(dataset_dir, metadata, idx, labels_ordered)
+    if oracle_metrics is None:
+        status = oracle_cache_status(dataset_dir, metadata, labels_ordered)
+        print(f"Skipping oracle metrics for {dataset_dir}: {status}.")
+
+    oracle_snr_summary = None
+    oracle_osr_summary = None
+    oracle_info_snr_summary = None
+    if oracle_metrics is not None:
+        oracle_snr_summary = accuracy_by_snr(
+            metadata, idx, oracle_metrics["y_true"], oracle_metrics["y_pred"], SNR_BIN_WIDTH,
+        ).rename({"accuracy": "oracle_accuracy"})
+        oracle_osr_summary = accuracy_by_osr_snr_levels(
+            metadata, idx, oracle_metrics["y_true"], oracle_metrics["y_pred"], SNR_BIN_WIDTH,
+        ).rename({"accuracy": "oracle_accuracy"})
+        oracle_info_snr_summary = information_by_snr(
+            metadata, idx, oracle_metrics["y_true"], oracle_metrics["y_pred"],
+            oracle_metrics["nll_bits"], len(label_to_id), SNR_BIN_WIDTH,
+        )
+    class_summary = per_class_metrics(test_metrics["y_true"], test_metrics["y_pred"], labels_ordered)
+
+    name_dir = artifact_dir / name
+    name_dir.mkdir(parents=True, exist_ok=True)
+    confusion_path = name_dir / "confusion_matrix.png"
+    snr_plot_path = name_dir / "accuracy_vs_snr.png"
+    snr_csv_path = name_dir / "accuracy_vs_snr.csv"
+    osr_plot_path = name_dir / "accuracy_vs_osr.png"
+    osr_csv_path = name_dir / "accuracy_vs_osr.csv"
+    ebw_plot_path = name_dir / "accuracy_vs_ebw.png"
+    ebw_csv_path = name_dir / "accuracy_vs_ebw.csv"
+    ub_csv_path = name_dir / "union_bound_by_snr.csv"
+    oracle_snr_csv_path = name_dir / "oracle_accuracy_by_snr.csv"
+    oracle_osr_csv_path = name_dir / "oracle_accuracy_by_osr.csv"
+    oracle_info_summary_path = name_dir / "oracle_information_summary.csv"
+    oracle_info_snr_path = name_dir / "oracle_information_by_snr.csv"
+    class_csv_path = name_dir / "per_class_metrics.csv"
+    accuracy_bootstrap_path = name_dir / "accuracy_bootstrap.csv"
+    info_summary_path = name_dir / "information_summary.csv"
+    info_snr_path = name_dir / "information_by_snr.csv"
+    info_plot_path = name_dir / "information_by_snr.png"
+    reliability_path = name_dir / "reliability_diagram.png"
+    calib_csv_path = name_dir / "calibration_stats.csv"
+    calib_snr_plot_path = name_dir / "calibration_by_snr.png"
+    calib_snr_csv_path = name_dir / "calibration_by_snr.csv"
+
+    snr_bins = snr_summary["snr_bin_db"].to_numpy()
+    ub_summary = union_bound_accuracy_by_snr(snr_bins, labels_ordered)
+    mi_fraction = np.clip(
+        info_snr_summary["mi_nll_lower_bound_bits"].to_numpy()
+        / info_snr_summary["label_entropy_bits"].to_numpy(),
+        0.0, 1.0,
+    )
+    overlays: Dict = {
+        "Union bound (erfc)": ub_summary["union_bound_accuracy"].to_numpy(),
+        "MI fraction (NLL lower bound)": mi_fraction,
+    }
+    osr_overlays: Dict = {}
+    fraction_overlays = None
+    if oracle_metrics is not None:
+        oracle_accuracy = (
+            snr_summary.select("snr_bin_db")
+            .join(oracle_snr_summary.select(["snr_bin_db", "oracle_accuracy"]), on="snr_bin_db", how="left")
+            ["oracle_accuracy"]
+            .to_numpy()
+        )
+        oracle_mi_fraction = (
+            info_snr_summary.select("snr_bin_db")
+            .join(
+                oracle_info_snr_summary.select(["snr_bin_db", "pred_label_mi_fraction"]),
+                on="snr_bin_db",
+                how="left",
+            )
+            ["pred_label_mi_fraction"]
+            .to_numpy()
+        )
+        oracle_osr_overlay = (
+            oracle_osr_summary
+            .rename({"oracle_accuracy": "accuracy"})
+            .select(["snr_bin_db", "snr_bin_end_db", "osr", "n", "accuracy"])
+        )
+        overlays["Oracle (known nuisance)"] = oracle_accuracy
+        osr_overlays["Oracle (known nuisance)"] = oracle_osr_overlay
+        fraction_overlays = {"Oracle MI fraction": oracle_mi_fraction}
+
+    plot_confusion_matrix(test_metrics["confusion"], labels_ordered, confusion_path, name)
+    plot_accuracy_by_snr(snr_summary, snr_plot_path, name, overlays=overlays)
+    plot_accuracy_by_osr(osr_summary, osr_plot_path, name, overlays=osr_overlays or None)
+    plot_accuracy_by_ebw(ebw_summary, ebw_plot_path, name)
+    plot_information_by_snr(info_snr_summary, info_summary_dict, info_plot_path, name, fraction_overlays=fraction_overlays)
+
+    snr_summary.write_csv(snr_csv_path)
+    osr_summary.write_csv(osr_csv_path)
+    ebw_summary.write_csv(ebw_csv_path)
+    ub_summary.write_csv(ub_csv_path)
+    if oracle_metrics is not None:
+        oracle_snr_summary.write_csv(oracle_snr_csv_path)
+        oracle_osr_summary.write_csv(oracle_osr_csv_path)
+        pl.DataFrame([information_summary(oracle_metrics["confusion"], oracle_metrics["nll_bits"])]).write_csv(oracle_info_summary_path)
+        oracle_info_snr_summary.write_csv(oracle_info_snr_path)
+    class_summary.write_csv(class_csv_path)
+    pl.DataFrame([accuracy_bootstrap]).write_csv(accuracy_bootstrap_path)
+    pl.DataFrame([info_summary_dict]).write_csv(info_summary_path)
+    info_snr_summary.write_csv(info_snr_path)
+
+    calib_df, ece, mce = calibration_stats(test_metrics["y_true"], test_metrics["confidence"], test_metrics["y_pred"])
+    calib_snr_df = calibration_by_snr(
+        metadata, idx, test_metrics["y_true"], test_metrics["confidence"], test_metrics["y_pred"], SNR_BIN_WIDTH,
+    )
+    plot_reliability_diagram(calib_df, ece, mce, reliability_path, name)
+    plot_calibration_by_snr(calib_snr_df, calib_snr_plot_path, name)
+    calib_df.write_csv(calib_csv_path)
+    calib_snr_df.write_csv(calib_snr_csv_path)
+
+    plots_path = f"plots/{name}"
+    tables_path = f"tables/{name}"
+    mlflow.log_artifact(str(confusion_path), artifact_path=plots_path)
+    mlflow.log_artifact(str(snr_plot_path), artifact_path=plots_path)
+    mlflow.log_artifact(str(osr_plot_path), artifact_path=plots_path)
+    mlflow.log_artifact(str(ebw_plot_path), artifact_path=plots_path)
+    mlflow.log_artifact(str(info_plot_path), artifact_path=plots_path)
+    mlflow.log_artifact(str(reliability_path), artifact_path=plots_path)
+    mlflow.log_artifact(str(calib_snr_plot_path), artifact_path=plots_path)
+    mlflow.log_artifact(str(snr_csv_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(osr_csv_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(ebw_csv_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(ub_csv_path), artifact_path=tables_path)
+    if oracle_metrics is not None:
+        mlflow.log_artifact(str(oracle_snr_csv_path), artifact_path=tables_path)
+        mlflow.log_artifact(str(oracle_osr_csv_path), artifact_path=tables_path)
+        mlflow.log_artifact(str(oracle_info_summary_path), artifact_path=tables_path)
+        mlflow.log_artifact(str(oracle_info_snr_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(class_csv_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(accuracy_bootstrap_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(info_summary_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(info_snr_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(calib_csv_path), artifact_path=tables_path)
+    mlflow.log_artifact(str(calib_snr_csv_path), artifact_path=tables_path)
+
+    mlflow.log_metric(f"{name}_accuracy", test_metrics["accuracy"])
+    mlflow.log_metric(
+        f"{name}_accuracy_ci_half_width",
+        (accuracy_bootstrap["ci_upper"] - accuracy_bootstrap["ci_lower"]) / 2.0,
+    )
+    if oracle_metrics is not None:
+        mlflow.log_metric(f"{name}_oracle_accuracy", oracle_metrics["accuracy"])
+    log_f1_metrics(test_metrics["y_true"], test_metrics["y_pred"], labels_ordered, prefix=f"{name}_")
+
+    return {
+        "accuracy": test_metrics["accuracy"],
+        "accuracy_bootstrap": accuracy_bootstrap,
+        "ece": ece,
+        "mce": mce,
+        "confusion": test_metrics["confusion"],
+        "accuracy_by_snr": snr_summary,
+        "accuracy_by_osr": osr_summary,
+        "information_summary": pl.DataFrame([info_summary_dict]),
+        "information_by_snr": info_snr_summary,
+        "per_class_metrics": class_summary,
+        "calibration_stats": calib_df,
+        "confusion_path": str(confusion_path),
+    }
+
+
 def train_one_model(
     args: argparse.Namespace,
     model_name: str,
@@ -201,6 +399,7 @@ def train_one_model(
     label_to_id: Dict[str, int],
     id_to_label: Dict[int, str],
     splits: Tuple[np.ndarray, np.ndarray, np.ndarray],
+    extra_test_sets: Optional[List[Tuple[str, str, np.ndarray, pl.DataFrame]]] = None,
 ) -> Dict:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     representation = representation_for_model(model_name)
@@ -238,7 +437,6 @@ def train_one_model(
     )
     train_loader = get_data_loader(train_signals, train_metadata, train_idx, label_to_id, shuffle=True, **loader_kwargs)
     val_loader = get_data_loader(val_signals, val_metadata, val_idx, label_to_id, shuffle=False, **loader_kwargs)
-    test_loader = get_data_loader(test_signals, test_metadata, test_idx, label_to_id, shuffle=False, **loader_kwargs)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best_state = None
@@ -306,221 +504,44 @@ def train_one_model(
         metadata={**parameter_counts, **model_info},
         params=parameter_counts,
     )
-    test_metrics = evaluate(model, test_loader, device, len(label_to_id), desc="test")
-    accuracy_bootstrap = bootstrap_accuracy(test_metrics["y_true"], test_metrics["y_pred"], seed=args.seed)
-    snr_summary = accuracy_by_snr(test_metadata, test_idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
-    osr_summary = accuracy_by_osr_snr_levels(
-        test_metadata,
-        test_idx,
-        test_metrics["y_true"],
-        test_metrics["y_pred"],
-        SNR_BIN_WIDTH,
-    )
-    ebw_summary = accuracy_by_ebw(test_metadata, test_idx, test_metrics["y_true"], test_metrics["y_pred"])
-    info_summary = information_summary(test_metrics["confusion"], test_metrics["nll_bits"])
-    info_snr_summary = information_by_snr(
-        test_metadata,
-        test_idx,
-        test_metrics["y_true"],
-        test_metrics["y_pred"],
-        test_metrics["nll_bits"],
-        len(label_to_id),
-        SNR_BIN_WIDTH,
-    )
-    labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
-    oracle_metrics = load_oracle_cache(args.test_dataset_dir_effective, test_metadata, test_idx, labels_ordered)
-    if oracle_metrics is None:
-        status = oracle_cache_status(args.test_dataset_dir_effective, test_metadata, labels_ordered)
-        print(f"Skipping oracle metrics for {args.test_dataset_dir_effective}: {status}.")
-
-    oracle_snr_summary = None
-    oracle_osr_summary = None
-    oracle_info_summary = None
-    oracle_info_snr_summary = None
-    if oracle_metrics is not None:
-        oracle_snr_summary = accuracy_by_snr(
-            test_metadata,
-            test_idx,
-            oracle_metrics["y_true"],
-            oracle_metrics["y_pred"],
-            SNR_BIN_WIDTH,
-        ).rename({"accuracy": "oracle_accuracy"})
-        oracle_osr_summary = accuracy_by_osr_snr_levels(
-            test_metadata,
-            test_idx,
-            oracle_metrics["y_true"],
-            oracle_metrics["y_pred"],
-            SNR_BIN_WIDTH,
-        ).rename({"accuracy": "oracle_accuracy"})
-        oracle_info_summary = information_summary(oracle_metrics["confusion"], oracle_metrics["nll_bits"])
-        oracle_info_snr_summary = information_by_snr(
-            test_metadata,
-            test_idx,
-            oracle_metrics["y_true"],
-            oracle_metrics["y_pred"],
-            oracle_metrics["nll_bits"],
-            len(label_to_id),
-            SNR_BIN_WIDTH,
-        )
-    class_summary = per_class_metrics(test_metrics["y_true"], test_metrics["y_pred"], labels_ordered)
     artifact_dir = MLFLOW_STAGING / mlflow.active_run().info.run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    confusion_path = artifact_dir / "confusion_matrix.png"
-    snr_plot_path = artifact_dir / "accuracy_vs_snr.png"
-    snr_csv_path = artifact_dir / "accuracy_vs_snr.csv"
-    osr_plot_path = artifact_dir / "accuracy_vs_osr.png"
-    osr_csv_path = artifact_dir / "accuracy_vs_osr.csv"
-    ebw_plot_path = artifact_dir / "accuracy_vs_ebw.png"
-    ebw_csv_path = artifact_dir / "accuracy_vs_ebw.csv"
-    ub_csv_path = artifact_dir / "union_bound_by_snr.csv"
-    oracle_snr_csv_path = artifact_dir / "oracle_accuracy_by_snr.csv"
-    oracle_osr_csv_path = artifact_dir / "oracle_accuracy_by_osr.csv"
-    oracle_info_summary_path = artifact_dir / "oracle_information_summary.csv"
-    oracle_info_snr_path = artifact_dir / "oracle_information_by_snr.csv"
-    class_csv_path = artifact_dir / "per_class_metrics.csv"
-    accuracy_bootstrap_path = artifact_dir / "accuracy_bootstrap.csv"
-    info_summary_path = artifact_dir / "information_summary.csv"
-    info_snr_path = artifact_dir / "information_by_snr.csv"
-    info_plot_path = artifact_dir / "information_by_snr.png"
-    from modreczoo.plotting import (
-        plot_accuracy_by_ebw,
-        plot_accuracy_by_osr,
-        plot_accuracy_by_snr,
-        plot_calibration_by_snr,
-        plot_confusion_matrix,
-        plot_information_by_snr,
-        plot_input_examples,
-        plot_reliability_diagram,
-    )
 
+    from modreczoo.plotting import plot_input_examples
     input_examples_path = artifact_dir / "input_examples.png"
     plot_input_examples(train_loader, id_to_label, representation, channel_format, input_examples_path)
     mlflow.log_artifact(str(input_examples_path), artifact_path="plots")
 
-    snr_bins = snr_summary["snr_bin_db"].to_numpy()
-    ub_summary = union_bound_accuracy_by_snr(snr_bins, labels_ordered)
-    mi_fraction = np.clip(
-        info_snr_summary["mi_nll_lower_bound_bits"].to_numpy()
-        / info_snr_summary["label_entropy_bits"].to_numpy(),
-        0.0, 1.0,
+    eval_result = evaluate_and_log_test_set(
+        "test", model, test_signals, test_metadata, test_idx,
+        label_to_id, id_to_label, loader_kwargs, artifact_dir,
+        args.test_dataset_dir_effective, args.seed, device,
     )
-    overlays = {
-        "Union bound (erfc)": ub_summary["union_bound_accuracy"].to_numpy(),
-        "MI fraction (NLL lower bound)": mi_fraction,
-    }
-    osr_overlays = {}
-    fraction_overlays = None
-    if oracle_metrics is not None:
-        oracle_accuracy = (
-            snr_summary.select("snr_bin_db")
-            .join(oracle_snr_summary.select(["snr_bin_db", "oracle_accuracy"]), on="snr_bin_db", how="left")
-            ["oracle_accuracy"]
-            .to_numpy()
+    for extra_name, extra_dir, extra_signals, extra_metadata in (extra_test_sets or []):
+        extra_signals = pad_or_trim_signals(extra_signals, train_signals.shape[1])
+        extra_idx = np.arange(len(extra_metadata), dtype=np.int64)
+        evaluate_and_log_test_set(
+            extra_name, model, extra_signals, extra_metadata, extra_idx,
+            label_to_id, id_to_label, loader_kwargs, artifact_dir,
+            extra_dir, args.seed, device,
         )
-        oracle_mi_fraction = (
-            info_snr_summary.select("snr_bin_db")
-            .join(
-                oracle_info_snr_summary.select(["snr_bin_db", "pred_label_mi_fraction"]),
-                on="snr_bin_db",
-                how="left",
-            )
-            ["pred_label_mi_fraction"]
-            .to_numpy()
-        )
-        oracle_osr_overlay = (
-            oracle_osr_summary
-            .rename({"oracle_accuracy": "accuracy"})
-            .select(["snr_bin_db", "snr_bin_end_db", "osr", "n", "accuracy"])
-        )
-        overlays["Oracle (known nuisance)"] = oracle_accuracy
-        osr_overlays["Oracle (known nuisance)"] = oracle_osr_overlay
-        fraction_overlays = {"Oracle MI fraction": oracle_mi_fraction}
-
-    plot_confusion_matrix(test_metrics["confusion"], labels_ordered, confusion_path, model_name)
-    plot_accuracy_by_snr(snr_summary, snr_plot_path, model_name, overlays=overlays)
-    plot_accuracy_by_osr(osr_summary, osr_plot_path, model_name, overlays=osr_overlays or None)
-    plot_accuracy_by_ebw(ebw_summary, ebw_plot_path, model_name)
-    plot_information_by_snr(
-        info_snr_summary,
-        info_summary,
-        info_plot_path,
-        model_name,
-        fraction_overlays=fraction_overlays,
-    )
-    snr_summary.write_csv(snr_csv_path)
-    osr_summary.write_csv(osr_csv_path)
-    ebw_summary.write_csv(ebw_csv_path)
-    ub_summary.write_csv(ub_csv_path)
-    if oracle_metrics is not None:
-        oracle_snr_summary.write_csv(oracle_snr_csv_path)
-        oracle_osr_summary.write_csv(oracle_osr_csv_path)
-        pl.DataFrame([oracle_info_summary]).write_csv(oracle_info_summary_path)
-        oracle_info_snr_summary.write_csv(oracle_info_snr_path)
-    class_summary.write_csv(class_csv_path)
-    pl.DataFrame([accuracy_bootstrap]).write_csv(accuracy_bootstrap_path)
-    pl.DataFrame([info_summary]).write_csv(info_summary_path)
-    info_snr_summary.write_csv(info_snr_path)
-    calib_df, ece, mce = calibration_stats(
-        test_metrics["y_true"], test_metrics["confidence"], test_metrics["y_pred"]
-    )
-    calib_snr_df = calibration_by_snr(
-        test_metadata, test_idx, test_metrics["y_true"], test_metrics["confidence"], test_metrics["y_pred"], SNR_BIN_WIDTH
-    )
-    reliability_path = artifact_dir / "reliability_diagram.png"
-    calib_csv_path = artifact_dir / "calibration_stats.csv"
-    calib_snr_plot_path = artifact_dir / "calibration_by_snr.png"
-    calib_snr_csv_path = artifact_dir / "calibration_by_snr.csv"
-    plot_reliability_diagram(calib_df, ece, mce, reliability_path, model_name)
-    plot_calibration_by_snr(calib_snr_df, calib_snr_plot_path, model_name)
-    calib_df.write_csv(calib_csv_path)
-    calib_snr_df.write_csv(calib_snr_csv_path)
-    mlflow.log_artifact(str(confusion_path), artifact_path="plots")
-    mlflow.log_artifact(str(snr_plot_path), artifact_path="plots")
-    mlflow.log_artifact(str(osr_plot_path), artifact_path="plots")
-    mlflow.log_artifact(str(ebw_plot_path), artifact_path="plots")
-    mlflow.log_artifact(str(info_plot_path), artifact_path="plots")
-    mlflow.log_artifact(str(reliability_path), artifact_path="plots")
-    mlflow.log_artifact(str(calib_snr_plot_path), artifact_path="plots")
-    mlflow.log_artifact(str(snr_csv_path), artifact_path="tables")
-    mlflow.log_artifact(str(osr_csv_path), artifact_path="tables")
-    mlflow.log_artifact(str(ebw_csv_path), artifact_path="tables")
-    mlflow.log_artifact(str(ub_csv_path), artifact_path="tables")
-    if oracle_metrics is not None:
-        mlflow.log_artifact(str(oracle_snr_csv_path), artifact_path="tables")
-        mlflow.log_artifact(str(oracle_osr_csv_path), artifact_path="tables")
-        mlflow.log_artifact(str(oracle_info_summary_path), artifact_path="tables")
-        mlflow.log_artifact(str(oracle_info_snr_path), artifact_path="tables")
-    mlflow.log_artifact(str(class_csv_path), artifact_path="tables")
-    mlflow.log_artifact(str(accuracy_bootstrap_path), artifact_path="tables")
-    mlflow.log_artifact(str(info_summary_path), artifact_path="tables")
-    mlflow.log_artifact(str(info_snr_path), artifact_path="tables")
-    mlflow.log_artifact(str(calib_csv_path), artifact_path="tables")
-    mlflow.log_artifact(str(calib_snr_csv_path), artifact_path="tables")
-    mlflow.log_metric("test_accuracy", test_metrics["accuracy"])
-    mlflow.log_metric(
-        "test_accuracy_ci_half_width",
-        (accuracy_bootstrap["ci_upper"] - accuracy_bootstrap["ci_lower"]) / 2.0,
-    )
     mlflow.log_metric("best_val_accuracy", best_val_acc)
-    if oracle_metrics is not None:
-        mlflow.log_metric("oracle_accuracy", oracle_metrics["accuracy"])
-    log_f1_metrics(test_metrics["y_true"], test_metrics["y_pred"], labels_ordered)
     return {
         "model": model_name,
         "representation": representation,
         "best_val_accuracy": best_val_acc,
-        "test_accuracy": test_metrics["accuracy"],
-        "accuracy_bootstrap": accuracy_bootstrap,
-        "test_ece": ece,
-        "test_mce": mce,
-        "confusion": test_metrics["confusion"],
-        "accuracy_by_snr": snr_summary,
-        "accuracy_by_osr": osr_summary,
-        "information_summary": pl.DataFrame([info_summary]),
-        "information_by_snr": info_snr_summary,
-        "per_class_metrics": class_summary,
-        "calibration_stats": calib_df,
-        "confusion_path": str(confusion_path),
+        "test_accuracy": eval_result["accuracy"],
+        "accuracy_bootstrap": eval_result["accuracy_bootstrap"],
+        "test_ece": eval_result["ece"],
+        "test_mce": eval_result["mce"],
+        "confusion": eval_result["confusion"],
+        "accuracy_by_snr": eval_result["accuracy_by_snr"],
+        "accuracy_by_osr": eval_result["accuracy_by_osr"],
+        "information_summary": eval_result["information_summary"],
+        "information_by_snr": eval_result["information_by_snr"],
+        "per_class_metrics": eval_result["per_class_metrics"],
+        "calibration_stats": eval_result["calibration_stats"],
+        "confusion_path": eval_result["confusion_path"],
     }
 
 
@@ -785,6 +806,7 @@ def run_config(
     sweep_index: int,
     sweep_total: int,
     config_yaml: Optional[str] = None,
+    extra_test_sets: Optional[List[Tuple[str, str, np.ndarray, pl.DataFrame]]] = None,
 ) -> None:
     test_n_samples_original = test_signals.shape[1]
     test_signals = pad_or_trim_signals(test_signals, train_signals.shape[1])
@@ -810,6 +832,7 @@ def run_config(
             label_to_id,
             id_to_label,
             splits,
+            extra_test_sets=extra_test_sets,
         )
         summary_path = MLFLOW_ARTIFACTS / f"performance_summary_{run.info.run_id}.txt"
         write_summary(summary_path, run.info.run_id, args, labels, [result])

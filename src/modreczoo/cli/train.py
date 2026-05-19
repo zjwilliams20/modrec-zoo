@@ -6,6 +6,8 @@ import argparse
 import numpy as np
 import torch
 
+from pathlib import Path
+
 from modreczoo.data import load_dataset, ordered_modulation_labels
 from modreczoo.oracle import build_oracle_cache
 from modreczoo.training import (
@@ -36,6 +38,12 @@ def build_parser() -> ArgumentParser:
         "--test-dataset-dir",
         default=None,
         help="Optional external dataset for final test/OOD evaluation. Defaults to a held-out split of --dataset-dir.",
+    )
+    parser.add_argument(
+        "--extra-test-dirs",
+        nargs="*",
+        default=[],
+        help="Additional dataset directories evaluated after training, logged under their directory stem name.",
     )
     parser.add_argument(
         "--models",
@@ -169,6 +177,11 @@ def main() -> None:
         args.test_dataset_source = "heldout_split"
 
     val_signals, val_metadata = train_signals, train_metadata
+    extra_test_sets = []
+    for extra_dir in (args.extra_test_dirs or []):
+        extra_signals, extra_metadata = load_dataset(extra_dir)
+        validate_known_labels(extra_metadata, labels, extra_dir, "Extra test")
+        extra_test_sets.append((Path(extra_dir).stem, extra_dir, extra_signals, extra_metadata))
     args.n_train_dataset_examples_available = int(train_signals.shape[0])
     args.n_train_dataset_examples_used = int(len(train_dataset_idx))
     args.n_test_dataset_examples_available = int(test_signals.shape[0])
@@ -220,6 +233,7 @@ def main() -> None:
                     sweep_index,
                     len(configs),
                     config_yaml=config_yaml,
+                    extra_test_sets=extra_test_sets or None,
                 )
             except KeyboardInterrupt:
                 print(f"\n  Skipping {run_name_for(cfg, model_name)}. Ctrl+C again within 2s to quit.")
