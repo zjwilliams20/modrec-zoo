@@ -86,6 +86,9 @@ def test_write_performance_explorer_smoke(tmp_path: Path) -> None:
     html = out.read_text(encoding="utf-8")
     assert "test Performance Explorer" in html
     assert "Plotly.newPlot" in html
+    assert "row-normalized" in html
+    assert "SNR 0-4 dB" in html
+    assert "autorange\":\"reversed" in html
     assert "Highest-Lift Error Slices" in html
     assert "Metadata Histogram" in html
     assert "Highest-Confidence Errors" in html

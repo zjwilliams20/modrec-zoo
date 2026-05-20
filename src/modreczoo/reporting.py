@@ -118,7 +118,7 @@ def write_performance_explorer(
     labels = list(labels)
     path.parent.mkdir(parents=True, exist_ok=True)
     figures = [
-        _confusion_figure(confusion, labels),
+        _confusion_figure(predictions, labels),
         _slice_figure(error_slices),
         _dimension_accuracy_figure(predictions),
         _metadata_histogram_figure(predictions),
@@ -219,18 +219,78 @@ def _plot_div(fig: go.Figure, include_plotlyjs: bool = False) -> str:
     return pio.to_html(fig, include_plotlyjs=include_plotlyjs, full_html=False)
 
 
-def _confusion_figure(confusion: np.ndarray, labels: list[str]) -> go.Figure:
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=confusion,
-            x=labels,
-            y=labels,
-            colorscale="Blues",
-            hovertemplate="true=%{y}<br>pred=%{x}<br>n=%{z}<extra></extra>",
+def _confusion_figure(predictions: pl.DataFrame, labels: list[str]) -> go.Figure:
+    ranges = _snr_ranges(predictions)
+    traces = []
+    buttons = []
+    for i, (range_label, mask) in enumerate(ranges):
+        counts = _confusion_counts(predictions.filter(pl.Series(mask)), labels)
+        z = _row_normalized(counts)
+        traces.append(
+            go.Heatmap(
+                z=z,
+                x=labels,
+                y=labels,
+                customdata=counts,
+                zmin=0.0,
+                zmax=1.0,
+                colorscale="Blues",
+                visible=i == 0,
+                colorbar={"title": "row frac"} if i == 0 else None,
+                hovertemplate=(
+                    "true=%{y}<br>pred=%{x}<br>"
+                    "row-normalized=%{z:.3f}<br>n=%{customdata}<extra></extra>"
+                ),
+            )
         )
+        buttons.append(
+            {
+                "label": range_label,
+                "method": "update",
+                "args": [
+                    {"visible": [j == i for j in range(len(ranges))]},
+                    {"title": f"Confusion Matrix ({range_label})"},
+                ],
+            }
+        )
+    fig = go.Figure(traces)
+    fig.update_layout(
+        title=f"Confusion Matrix ({ranges[0][0]})",
+        xaxis_title="Predicted",
+        yaxis_title="True",
+        yaxis={"autorange": "reversed"},
+        height=560,
+        updatemenus=[{"buttons": buttons, "direction": "down", "x": 1.0, "y": 1.14}],
     )
-    fig.update_layout(title="Confusion Matrix", xaxis_title="Predicted", yaxis_title="True", height=520)
     return fig
+
+
+def _snr_ranges(predictions: pl.DataFrame) -> list[tuple[str, np.ndarray]]:
+    n = len(predictions)
+    ranges = [("All SNR", np.ones(n, dtype=bool))]
+    if "snr_db" not in predictions.columns or n == 0:
+        return ranges
+    snr = predictions["snr_db"].to_numpy()
+    finite = np.isfinite(snr)
+    bins = np.floor(snr[finite] / 4.0) * 4.0
+    for start in sorted(np.unique(bins)):
+        mask = finite & (np.floor(snr / 4.0) * 4.0 == start)
+        ranges.append((f"SNR {start:g}-{start + 4:g} dB", mask))
+    return ranges
+
+
+def _confusion_counts(predictions: pl.DataFrame, labels: list[str]) -> np.ndarray:
+    label_to_id = {label: i for i, label in enumerate(labels)}
+    counts = np.zeros((len(labels), len(labels)), dtype=int)
+    for true_label, pred_label in zip(predictions["true_label"].to_list(), predictions["pred_label"].to_list()):
+        if true_label in label_to_id and pred_label in label_to_id:
+            counts[label_to_id[true_label], label_to_id[pred_label]] += 1
+    return counts
+
+
+def _row_normalized(counts: np.ndarray) -> np.ndarray:
+    row_sum = counts.sum(axis=1, keepdims=True)
+    return np.divide(counts, row_sum, out=np.zeros_like(counts, dtype=float), where=row_sum > 0)
 
 
 def _slice_figure(error_slices: pl.DataFrame) -> go.Figure:

@@ -40,7 +40,6 @@ Potential research directions include:
 * Differentiable preprocessing: channel formats, continuously valued powers, fractional delays
 * Architectures: generative stuff, KAN?
 * Better algorithms for uncertainty awareness
-* Upper bound using oracle information
 
 ## Usage
 
