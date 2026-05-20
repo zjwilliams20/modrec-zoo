@@ -11,9 +11,12 @@
 |---------------------|----------------------|----------|----------------------------------------|
 | `apf_net_1d`        | apf (required)       | ~84%     | 3-stream encoder + attention fusion    |
 | `resnet_1d`         | differential_complex | 82.2%    | standard backbone, best representation |
-| `diff_resnet_1d`    | differential_complex | 81.7%    | alias: ResNet1D forced to d[n] format  |
 | `multiscale_pyramid_1d` | differential_complex | 81.6% | slight val→test overfit             |
 | `patch_transformer_1d`  | apf              | 66.7%    | underperforms; likely needs more data  |
+| `multi_stream_1d`   | —                    | —        | per-channel streams + attention fusion |
+| `multilag_net_1d`   | multilag (required)  | —        | multi-lag CSP features → ResNet1D      |
+| `cyclic_caf_1d`     | cyclic_caf (required)| —        | CAF magnitude spectra → ResNet1D       |
+| `scf_resnet`        | scf (required)       | —        | spectral correlation fn → ResNet2D     |
 
 ---
 
@@ -22,7 +25,7 @@
 ```
 ─────────────────── BASELINES ──────────────────────────────────────────────────────
 
- TimeCNN / FreqCNN      SpectrogramCNN          SpectrogramResNet
+ CNN1D (time/freq)      CNN2D                   ResNet2D
  ──────────────────     ───────────────         ──────────────────
  (B, C, 2048)           (B, C, F, T)            (B, C, F, T)
        │                      │                       │
@@ -68,40 +71,56 @@
 
 ─────────────────── REPRESENTATION-DRIVEN ──────────────────────────────────────────
 
- diff_resnet_1d                    APFNet
- ─────────────────────────         ─────────────────────────────────────────────
- Preprocessing: d[n] = x[n]·x*[n-1]    Preprocessing: 4-ch APF decomposition
-   angle(d[n]) = instantaneous          ch0: log|x|          (amplitude)
-   phase change; magnitude = amp        ch1: cos∠x, ch2: sin∠x  (phase)
-   ratio. Removes carrier phase.        ch3: Δ∠x/π           (inst. freq.)
-                                         Modulation families map cleanly:
- (B, 2, 2048)  [Re(d), Im(d)]              PSK  → phase stream only
-       │                                   MSK  → freq stream only
-  ┌─ ResNet1D ─┐                           QAM  → amplitude + phase
-  │ (identical │
-  │ to above)  │       (B, 4, 2048)
-  └────────────┘             │
-       │            ┌────────┼────────┐
- Linear → C         ▼        ▼        ▼
-                 AmpEnc  PhaseEnc  FreqEnc
-                 ch[0]   ch[1:3]   ch[3]
-                  (64)    (64)      (64)
-                    │      │        │
-                    └──────┼────────┘
-                        stack
-                    (B, 3, 64)  ← 3 tokens
-                         │
-                  MultiheadAttn(heads=4)
-                  + residual + LayerNorm
-                         │
-                    mean(dim=1)
-                    Linear → C
+ APFNet                             MultiStreamNet
+ ─────────────────────────────────  ──────────────────────────────────────────
+ Preprocessing: 4-ch APF           Arbitrary C-channel input. One independent
+   ch0: log|x|      (amplitude)    StreamEncoder per channel; outputs fused
+   ch1: cos∠x, ch2: sin∠x (phase) via self-attention across C channel-tokens.
+   ch3: Δ∠x/π      (inst. freq.)
+   PSK  → phase stream                       (B, C, 2048)
+   MSK  → freq stream                              │
+   QAM  → amplitude + phase              per-channel split
+                                    ┌──────────────┼──────────────┐
+ (B, 4, 2048)                       ▼              ▼              ▼
+       │                       Enc[0]          Enc[1]      … Enc[C-1]
+ ┌─────┼────────┐               (64)            (64)           (64)
+ ▼     ▼        ▼               └──────────────┬──────────────┘
+ AmpEnc PhaseEnc FreqEnc                   stack (B, C, 64)
+ ch[0] ch[1:3] ch[3]                            │
+  (64)   (64)   (64)                 MultiheadAttn(heads=C)
+    └─────┼─────┘                   + residual + LayerNorm
+       stack                                    │
+   (B, 3, 64)                            mean(dim=1)
+        │                                Linear → C
+ MultiheadAttn(heads=4)
+ + residual + LayerNorm
+        │
+   mean(dim=1)
+   Linear → C
 
- StreamEncoder: Conv1d(k=7,s=2) → BN+ReLU
-                ResBlock1D(32→64, s=2)
-                ResBlock1D(64→128, s=2)
-                ResBlock1D(128→64, s=2)
-                GlobalMeanPool → 64-d feat
+ StreamEncoder (shared by APFNet and MultiStreamNet):
+   Conv1d(k=7,s=2) → BN+ReLU
+   ResBlock1D(32→64, s=2)
+   ResBlock1D(64→128, s=2)
+   ResBlock1D(128→64, s=2)
+   GlobalMeanPool → 64-d feat
+
+
+─────────────────── CSP-INSPIRED ───────────────────────────────────────────────────
+
+ multilag_net_1d             cyclic_caf_1d               scf_resnet
+ ──────────────────────      ─────────────────────        ──────────────────────
+ Preprocessing: multilag     Preprocessing: cyclic_caf   Preprocessing: scf
+   For τ ∈ {1, 4, 16}:        For τ ∈ {1, 4, 16}:        SCF: cross-spectral
+   z[n]·z*[n−τ] → Re/Im       |FFT(z[n]·z*[n−τ])|         density at each
+   3 lags × 2 ch = 6 ch        max-norm per lag            cyclic freq α
+   RMS-norm per lag            3 ch total                  (B, 1, α, F)
+
+ (B, 6, 2048)               (B, 3, 2048)
+       │                          │
+  ResNet1D                   ResNet1D                    ResNet2D
+       │                          │                          │
+  Linear → C                Linear → C                 Linear → C
 
 
 ─────────────────── ATTENTION / MULTI-SCALE ────────────────────────────────────────
@@ -140,17 +159,22 @@
 All models except `spectrogram_*` consume 1D time-domain tensors; spectrograms use 2D.
 The format is an input preprocessing step, not part of the model.
 
-| format               | channels | description                                                  |
-|----------------------|----------|--------------------------------------------------------------|
-| `real_imag`          | 2        | Raw I and Q — information-complete, no structure imposed     |
-| `mag`                | 1        | `log(1+|x|)` normalized — amplitude only                    |
-| `mag_phase`          | 2        | Log-magnitude + unwrapped phase/π                            |
-| `mag_inst_freq`      | 2        | Log-magnitude + Δphase/π (instantaneous frequency)          |
-| `differential_complex` | 2      | `Re(d), Im(d)` where `d[n]=x[n]·x*[n-1]`, RMS-normalized   |
-| `apf`                | 4        | `[log\|x\|, cos∠x, sin∠x, Δ∠x/π]` — required by APFNet    |
+| format               | channels | description                                                              |
+|----------------------|----------|--------------------------------------------------------------------------|
+| `real_imag`          | 2        | Raw I and Q — information-complete, no structure imposed                 |
+| `mag`                | 1        | `log(1+|x|)` normalized — amplitude only                                |
+| `mag_phase`          | 2        | Log-magnitude + unwrapped phase/π                                        |
+| `mag_inst_freq`      | 2        | Log-magnitude + Δphase/π (instantaneous frequency)                      |
+| `differential_complex` | 2      | `Re(d), Im(d)` where `d[n]=x[n]·x*[n-1]`, RMS-normalized               |
+| `apf`                | 4        | `[log\|x\|, cos∠x, sin∠x, Δ∠x/π]` — required by APFNet                |
+| `multilag`           | 6        | Re/Im of `x[n]·x*[n-τ]` for τ∈{1,4,16}, RMS-norm — required by `multilag_net_1d` |
+| `cyclic_caf`         | 3        | `\|FFT(x[n]·x*[n-τ])\|` for τ∈{1,4,16}, max-norm — required by `cyclic_caf_1d` |
+| `scf`                | 1 (2D)   | Spectral correlation function image — required by `scf_resnet`           |
 
 `differential_complex` removes the unknown carrier phase entirely; `apf` additionally
 decouples the three information streams that are orthogonal to the modulation taxonomy.
+`multilag` and `cyclic_caf` extend differential features to multiple lags, inspired by
+cyclostationary signal processing (CSP).
 
 ---
 
@@ -162,7 +186,7 @@ Three-layer plain 1D CNN. `frequency_cnn` is the same architecture applied to th
 magnitude spectrum instead of raw I/Q (handled in the data loader, not the model).
 No residual connections; fast to train, reasonable ceiling.
 
-- **File:** `models/baselines.py` · `TimeCNN`
+- **File:** `models/baselines.py` · `CNN1D`
 - **Formats:** any 1-D format
 - **Params:** ~170 K
 
@@ -173,7 +197,7 @@ No residual connections; fast to train, reasonable ceiling.
 Three-layer 2D CNN on STFT spectrograms. Isotropic 3×3 kernels. Simple enough to
 overfit on small datasets; useful as a spectrogram baseline.
 
-- **File:** `models/baselines.py` · `SpectrogramCNN`
+- **File:** `models/baselines.py` · `CNN2D`
 - **Formats:** any 2-D spectrogram format
 - **Key args:** `--spectrogram-base-channels` (default 24)
 
@@ -185,9 +209,9 @@ Full 4-stage 2D ResNet on STFT spectrograms with **anisotropic** kernels
 (`freq_kernel × time_kernel`). The asymmetry matters: frequency structure
 (narrowband vs. wideband) has different scale than temporal structure (symbol patterns).
 
-- **File:** `models/baselines.py` · `SpectrogramResNet`
+- **File:** `models/baselines.py` · `ResNet2D`
 - **Formats:** any 2-D spectrogram format
-- **Key args:** `--spectrogram-freq-kernel` (default 7), `--spectrogram-time-kernel` (default 3), `--spectrogram-base-channels`
+- **Key args:** `--spectrogram-freq-kernel` (default 5), `--spectrogram-time-kernel` (default 3), `--spectrogram-base-channels`
 
 ---
 
@@ -286,23 +310,6 @@ trick, but currently shows slightly more val→test overfit.
 
 ---
 
-### `diff_resnet_1d`
-
-`ResNet1D` applied to the **differential complex** representation. Not a new model
-class — it is `ResNet1D` with `required_channel_format = differential_complex`.
-
-The preprocessing `d[n] = x[n]·conj(x[n-1])` maps the signal into a frame where:
-- `angle(d[n])` = instantaneous phase *change* per sample
-- `|d[n]|` = amplitude ratio between adjacent samples
-
-This removes the unknown carrier phase offset entirely, making the PSK
-constellations cluster cleanly regardless of channel phase.
-
-- **File:** `models/baselines.py` · `ResNet1D` (reused)
-- **Formats:** `differential_complex` (forced)
-
----
-
 ### `apf_net_1d`
 
 Three independent stream encoders read the **amplitude**, **phase**, and **frequency**
@@ -323,3 +330,59 @@ to avoid the ±π discontinuity at the branch cut.
 - **File:** `models/advanced.py` · `APFNet`
 - **Formats:** `apf` (forced — 4-channel input required)
 - **Params:** ~380 K
+
+---
+
+### `multi_stream_1d`
+
+Generalises APFNet's stream-encoder + attention-fusion pattern to arbitrary
+channel counts. One independent `_StreamEncoder` (identical to APFNet's) processes
+each input channel, producing a 64-d token. The tokens are fused by a single
+multi-head self-attention layer where `num_heads = in_channels`; `stream_dim` is
+rounded up to the nearest multiple of `in_channels` to satisfy PyTorch's attention
+constraint. Classification reads from the mean-pooled output.
+
+Unlike APFNet, no physics-motivated channel decomposition is assumed — the model
+discovers inter-channel interactions purely from data. Works with any channel format.
+
+- **File:** `models/advanced.py` · `MultiStreamNet`
+- **Formats:** any 1-D format
+- **Params:** varies with `in_channels`
+
+---
+
+### `multilag_net_1d`
+
+`ResNet1D` applied to the **multi-lag** representation. For each of three lags
+τ ∈ {1, 4, 16}, computes the conjugate lag product `z[n]·z*[n-τ]` and extracts
+real and imaginary parts, giving 6 channels total (each lag RMS-normalised). This
+extends the differential-complex idea to multiple time scales simultaneously,
+capturing CSP-like structure without an explicit spectral analysis.
+
+- **File:** `models/baselines.py` · `ResNet1D` (reused)
+- **Formats:** `multilag` (forced — 6-channel input)
+
+---
+
+### `cyclic_caf_1d`
+
+`ResNet1D` applied to **cyclic autocorrelation function** magnitude spectra. For
+each of three lags τ ∈ {1, 4, 16}, computes `|FFT(z[n]·z*[n-τ])|` and
+max-normalises it, yielding 3 channels of length 2048. The resulting spectra are
+cyclostationary features sensitive to the modulation's characteristic symbol rate.
+
+- **File:** `models/baselines.py` · `ResNet1D` (reused)
+- **Formats:** `cyclic_caf` (forced — 3-channel input)
+
+---
+
+### `scf_resnet`
+
+`ResNet2D` applied to the **spectral correlation function** (SCF). The SCF is a
+2D image (cyclic frequency α × spectral frequency f) estimating the cross-spectral
+density between the signal and a frequency-shifted copy of itself. The result is
+a single-channel 2D representation that highlights the cyclostationary structure
+unique to each modulation class.
+
+- **File:** `models/baselines.py` · `ResNet2D` (reused)
+- **Formats:** `scf` (forced — 1-channel 2D input)
