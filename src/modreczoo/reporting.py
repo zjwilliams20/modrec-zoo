@@ -1,5 +1,6 @@
 from html import escape
 from pathlib import Path
+import re
 from typing import Dict, Iterable
 
 import numpy as np
@@ -399,16 +400,33 @@ def _metadata_histogram_figure(predictions: pl.DataFrame) -> go.Figure:
 
 def _accuracy_by_dimension(predictions: pl.DataFrame, dim: str) -> pl.DataFrame:
     bins = _slice_bins(dim, predictions[dim].to_numpy())
+    sort_keys = _slice_sort_keys(bins, predictions.schema[dim].is_numeric())
     return (
-        predictions.with_columns(pl.Series("slice", bins))
+        predictions.with_columns(pl.Series("slice", bins), pl.Series("slice_sort_key", sort_keys))
         .group_by("slice")
         .agg(
+            pl.col("slice_sort_key").min(),
             pl.len().alias("n"),
             (~pl.col("correct")).sum().alias("errors"),
             pl.col("correct").mean().alias("accuracy"),
         )
-        .sort("slice")
+        .sort(["slice_sort_key", "slice"])
+        .drop("slice_sort_key")
     )
+
+
+def _slice_sort_keys(labels: np.ndarray, numeric: bool) -> np.ndarray:
+    if not numeric:
+        return np.zeros(len(labels), dtype=float)
+    keys = []
+    for label in labels:
+        text = str(label)
+        if text == "missing":
+            keys.append(float("inf"))
+            continue
+        match = re.match(r"^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?", text, re.IGNORECASE)
+        keys.append(float(match.group(0)) if match else float("inf"))
+    return np.asarray(keys, dtype=float)
 
 
 def _metadata_dimensions(predictions: pl.DataFrame) -> list[str]:

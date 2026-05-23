@@ -221,10 +221,10 @@ def parse_metadata_file(path: str | Path) -> dict[int, dict]:
             if cspb_modulation not in LABEL_MAP:
                 raise ValueError(f"{path}:{line_no}: unsupported CSPB modulation {cspb_modulation!r}.")
 
-            base_symbol_period = float(parts[5])
-            upsample_factor = float(parts[6])
-            noise_spectral_density_db = float(parts[7])
-            downsample_factor = float(parts[8])
+            base_symbol_period = float(parts[2])
+            upsample_factor = float(parts[5])
+            downsample_factor = float(parts[6])
+            noise_spectral_density_db = float(parts[8])
             resample_ratio = 1.0 if downsample_factor == 0 else downsample_factor / upsample_factor
             symbol_rate = (1.0 / base_symbol_period) * resample_ratio
 
@@ -232,7 +232,7 @@ def parse_metadata_file(path: str | Path) -> dict[int, dict]:
                 "cspb_signal_index": cspb_signal_index,
                 "cspb_modulation": cspb_modulation,
                 "modulation": LABEL_MAP[cspb_modulation],
-                "snr_db": float(parts[2]),
+                "snr_db": float(parts[7]),
                 "cfo": float(parts[3]),
                 "ebw": float(parts[4]),
                 "base_symbol_period": base_symbol_period,

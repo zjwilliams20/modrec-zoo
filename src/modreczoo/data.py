@@ -11,7 +11,8 @@ from torch.utils.data import DataLoader, Dataset
 from modreczoo.models import representation_for_model
 
 
-SIGNALS_FILE = "signals.npz"
+SIGNALS_FILE = "signals.npy"
+EXTRAS_FILE = "extras.npz"
 METADATA_FILE = "metadata.parquet"
 README_MODULATION_ORDER = ("2PSK", "4PSK", "8PSK", "pi/4-DQPSK", "16QAM", "64QAM", "256QAM", "MSK")
 CSP_LAGS = (1, 4, 16)
@@ -22,22 +23,18 @@ def save_dataset(
     signals: np.ndarray,
     metadata: pl.DataFrame,
     extras: Optional[Dict[str, np.ndarray]] = None,
-    compressed: bool = False,
 ) -> None:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    arrays = {"signals": signals}
+    np.save(output / SIGNALS_FILE, signals)
     if extras:
-        arrays.update(extras)
-    save = np.savez_compressed if compressed else np.savez
-    save(output / SIGNALS_FILE, **arrays)
+        np.savez(output / EXTRAS_FILE, **extras)
     metadata.write_parquet(output / METADATA_FILE)
 
 
 def load_dataset(output_dir: str) -> Tuple[np.ndarray, pl.DataFrame]:
     output = Path(output_dir)
-    with np.load(output / SIGNALS_FILE) as data:
-        signals = data["signals"]
+    signals = np.load(output / SIGNALS_FILE, mmap_mode="r")
     return signals, pl.read_parquet(output / METADATA_FILE)
 
 
@@ -122,6 +119,8 @@ def get_data_loader(
     spectrogram_nperseg: int = 64,
     spectrogram_noverlap: int = 48,
     spectrogram_window: str = "hann",
+    pin_memory: bool = True,
+    persistent_workers: bool = True,
     **loader_kwargs,
 ) -> DataLoader:
     dataset = ModrecDataset(
@@ -139,13 +138,10 @@ def get_data_loader(
         spectrogram_noverlap=spectrogram_noverlap,
         spectrogram_window=spectrogram_window,
     )
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        **loader_kwargs,
-    )
+    if num_workers > 0:
+        loader_kwargs.setdefault("persistent_workers", persistent_workers)
+    loader_kwargs.setdefault("pin_memory", pin_memory)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, **loader_kwargs)
 
 
 def load_dataset_loader(
@@ -164,6 +160,8 @@ def load_dataset_loader(
     spectrogram_nperseg: int = 64,
     spectrogram_noverlap: int = 48,
     spectrogram_window: str = "hann",
+    pin_memory: bool = True,
+    persistent_workers: bool = True,
     **loader_kwargs,
 ) -> Tuple[DataLoader, np.ndarray, pl.DataFrame, Dict[str, int]]:
     signals, metadata = load_dataset(str(dataset_dir))
@@ -190,6 +188,8 @@ def load_dataset_loader(
         spectrogram_nperseg=spectrogram_nperseg,
         spectrogram_noverlap=spectrogram_noverlap,
         spectrogram_window=spectrogram_window,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
         **loader_kwargs,
     )
     return loader, signals, metadata, label_to_id

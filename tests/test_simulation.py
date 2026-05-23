@@ -6,25 +6,24 @@ from modreczoo.simulation import (
     generate_dataset,
     generate_symbols,
     in_band_noise_fraction,
-    osr_factor_pairs,
     rng_from_seed,
     sample_parameter_design,
 )
 
 
-def test_parameter_design_samples_rational_osr_above_one() -> None:
+def test_parameter_design_samples_integer_osr_above_one() -> None:
     params = dict(DEFAULT_PARAMS)
     params["seed"] = 3
     rows = sample_parameter_design(64, ("2PSK", "MSK"), params, rng_from_seed(3))
 
     assert all(row["upsample_factor"] >= 2 for row in rows)
-    assert all(row["downsample_factor"] >= 1 for row in rows)
+    assert all(row["downsample_factor"] == 1 for row in rows)
     assert all(row["upsample_factor"] / row["downsample_factor"] > 1 for row in rows)
     assert all(row["osr"] == row["upsample_factor"] / row["downsample_factor"] for row in rows)
-    assert any(not float(row["osr"]).is_integer() for row in rows)
+    assert all(float(row["osr"]).is_integer() for row in rows)
 
 
-def test_parameter_design_samples_unique_osr_values_uniformly() -> None:
+def test_parameter_design_samples_upsample_factors_uniformly() -> None:
     params = dict(DEFAULT_PARAMS)
     params.update(
         {
@@ -35,13 +34,11 @@ def test_parameter_design_samples_unique_osr_values_uniformly() -> None:
         }
     )
     rows = sample_parameter_design(512, ("2PSK",), params, rng_from_seed(11))
-    ratios = [ratio for ratio, _ in osr_factor_pairs(params["upsample_factor_range"], params["downsample_factor_range"])]
-    counts = {ratio: 0 for ratio in ratios}
+    counts = {float(up): 0 for up in range(*params["upsample_factor_range"])}
     for row in rows:
         counts[row["osr"]] += 1
 
     values = np.asarray(list(counts.values()))
-    assert len(counts) < sum(len(pairs) for _, pairs in osr_factor_pairs(params["upsample_factor_range"], params["downsample_factor_range"]))
     assert values.max() - values.min() <= 2
 
 
@@ -85,7 +82,7 @@ def test_in_band_noise_fraction_uses_srrc_bandwidth() -> None:
     assert narrow < wide
 
 
-def test_generate_dataset_metadata_includes_up_down_and_float_osr() -> None:
+def test_generate_dataset_metadata_uses_fixed_downsample_factor() -> None:
     params = dict(DEFAULT_PARAMS)
     params.update(
         {
@@ -101,14 +98,14 @@ def test_generate_dataset_metadata_includes_up_down_and_float_osr() -> None:
 
     assert signals.shape == (2, 128)
     assert metadata["upsample_factor"].to_list() == [4, 4]
-    assert metadata["downsample_factor"].to_list() == [3, 3]
-    assert metadata["osr"].to_list() == [4 / 3, 4 / 3]
+    assert metadata["downsample_factor"].to_list() == [1, 1]
+    assert metadata["osr"].to_list() == [4.0, 4.0]
 
 
 if __name__ == "__main__":
-    test_parameter_design_samples_rational_osr_above_one()
-    test_parameter_design_samples_unique_osr_values_uniformly()
+    test_parameter_design_samples_integer_osr_above_one()
+    test_parameter_design_samples_upsample_factors_uniformly()
     test_apply_pulse_shape_resamples_in_one_step_and_skips_srrc_for_msk()
     test_apply_pulse_shape_requires_real_oversampling()
     test_in_band_noise_fraction_uses_srrc_bandwidth()
-    test_generate_dataset_metadata_includes_up_down_and_float_osr()
+    test_generate_dataset_metadata_uses_fixed_downsample_factor()

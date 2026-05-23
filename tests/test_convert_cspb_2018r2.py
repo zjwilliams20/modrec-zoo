@@ -34,13 +34,17 @@ def test_read_tim_bytes_complex() -> None:
 
 def test_parse_metadata_maps_labels_and_effective_osr(tmp_path: Path) -> None:
     path = tmp_path / "signal_record.txt"
-    path.write_text("1 dqpsk 7 -1e-4 0.35 10 5 6.0 0.0\n2 64qam 8 2e-4 0.5 8 4 3.0 2\n")
+    path.write_text("1 dqpsk 10 -1e-4 0.35 5 0 7.0 0.0\n2 64qam 8 2e-4 0.5 4 2 3.0 0.0\n")
 
     rows = converter.parse_metadata_file(path)
 
     assert rows[1]["modulation"] == "pi/4-DQPSK"
+    assert rows[1]["snr_db"] == 7.0
     assert rows[1]["osr"] == 10.0
     assert rows[2]["modulation"] == "64QAM"
+    assert rows[2]["base_symbol_period"] == 8.0
+    assert rows[2]["upsample_factor"] == 4.0
+    assert rows[2]["downsample_factor"] == 2.0
     assert rows[2]["symbol_rate"] == (1 / 8) * (2 / 4)
     assert rows[2]["osr"] == 16.0
 
@@ -100,7 +104,7 @@ def test_convert_cspb_dataset_end_to_end_with_zip_and_missing_rows(tmp_path: Pat
     assert converted_metadata["cspb_signal_index"].to_list() == [1, 2]
     assert converted_metadata["modulation"].to_list() == ["2PSK", "4PSK"]
     assert manifest["source"] == "CSPB.ML.2018R2"
-    assert manifest["signals"] == "signals.npz"
+    assert manifest["signals"] == converter.SIGNALS_FILE
     assert manifest["metadata"] == "metadata.parquet"
     assert manifest["n_signals"] == 2
     assert manifest["modulations"] == ["2PSK", "4PSK"]

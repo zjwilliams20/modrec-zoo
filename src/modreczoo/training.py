@@ -1,5 +1,6 @@
 import argparse
 import copy
+import gc
 import json
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ from mlflow.tracking import MlflowClient
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from modreczoo.data import get_data_loader
+from modreczoo.data import get_data_loader, load_dataset
 from modreczoo.evaluation import (
     accuracy_by_ebw,
     accuracy_by_osr_snr_levels,
@@ -217,6 +218,8 @@ def evaluate_and_log_test_set(
     labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
     loader = get_data_loader(signals, metadata, idx, label_to_id, shuffle=False, **loader_kwargs)
     test_metrics = evaluate(model, loader, device, len(label_to_id), desc=name)
+    del loader
+    gc.collect()
     accuracy_bootstrap = bootstrap_accuracy(test_metrics["y_true"], test_metrics["y_pred"], seed=seed)
     snr_summary = accuracy_by_snr(metadata, idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
     osr_summary = accuracy_by_osr_snr_levels(metadata, idx, test_metrics["y_true"], test_metrics["y_pred"], SNR_BIN_WIDTH)
@@ -425,7 +428,7 @@ def train_one_model(
     label_to_id: Dict[str, int],
     id_to_label: Dict[int, str],
     splits: Tuple[np.ndarray, np.ndarray, np.ndarray],
-    extra_test_sets: Optional[List[Tuple[str, str, np.ndarray, pl.DataFrame]]] = None,
+    extra_test_dirs: Optional[List[str]] = None,
 ) -> Dict:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     representation = representation_for_model(model_name)
@@ -512,6 +515,9 @@ def train_one_model(
         if val_metrics["accuracy"] > best_val_acc:
             best_val_acc = val_metrics["accuracy"]
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    del epoch_bar
+    if "train_bar" in locals():
+        del train_bar
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -537,20 +543,32 @@ def train_one_model(
     input_examples_path = artifact_dir / "input_examples.png"
     plot_input_examples(train_loader, id_to_label, representation, channel_format, input_examples_path)
     mlflow.log_artifact(str(input_examples_path), artifact_path="plots")
+    del train_loader, val_loader
+    gc.collect()
 
     eval_result = evaluate_and_log_test_set(
         "test", model, test_signals, test_metadata, test_idx,
         label_to_id, id_to_label, loader_kwargs, artifact_dir,
         args.test_dataset_dir_effective, args.seed, device,
     )
-    for extra_name, extra_dir, extra_signals, extra_metadata in (extra_test_sets or []):
+    labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
+    for extra_dir in (extra_test_dirs or []):
+        print(f"Loading extra test dataset {extra_dir}...")
+        extra_signals, extra_metadata = load_dataset(extra_dir)
+        print(f"Loaded {extra_dir}: signals={extra_signals.shape} dtype={extra_signals.dtype}.")
+        validate_known_labels(extra_metadata, labels_ordered, extra_dir, "Extra test")
+        extra_name = Path(extra_dir).stem
         extra_signals = pad_or_trim_signals(extra_signals, train_signals.shape[1])
         extra_idx = np.arange(len(extra_metadata), dtype=np.int64)
-        evaluate_and_log_test_set(
-            extra_name, model, extra_signals, extra_metadata, extra_idx,
-            label_to_id, id_to_label, loader_kwargs, artifact_dir,
-            extra_dir, args.seed, device,
-        )
+        try:
+            evaluate_and_log_test_set(
+                extra_name, model, extra_signals, extra_metadata, extra_idx,
+                label_to_id, id_to_label, loader_kwargs, artifact_dir,
+                extra_dir, args.seed, device,
+            )
+        finally:
+            del extra_signals, extra_metadata, extra_idx
+            gc.collect()
     mlflow.log_metric("best_val_accuracy", best_val_acc)
     return {
         "model": model_name,
@@ -832,7 +850,7 @@ def run_config(
     sweep_index: int,
     sweep_total: int,
     config_yaml: Optional[str] = None,
-    extra_test_sets: Optional[List[Tuple[str, str, np.ndarray, pl.DataFrame]]] = None,
+    extra_test_dirs: Optional[List[str]] = None,
 ) -> None:
     test_n_samples_original = test_signals.shape[1]
     test_signals = pad_or_trim_signals(test_signals, train_signals.shape[1])
@@ -858,7 +876,7 @@ def run_config(
             label_to_id,
             id_to_label,
             splits,
-            extra_test_sets=extra_test_sets,
+            extra_test_dirs=extra_test_dirs,
         )
         summary_path = MLFLOW_ARTIFACTS / f"performance_summary_{run.info.run_id}.txt"
         write_summary(summary_path, run.info.run_id, args, labels, [result])

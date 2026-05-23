@@ -23,7 +23,7 @@ DEFAULT_PARAMS = {
     "cpo_range": (0.0, 1.0),  # cycles
     "sto_range": (-1 / 2, 1 / 2),  # symbols
     "upsample_factor_range": (2, 11),  # high endpoint is exclusive
-    "downsample_factor_range": (1, 10),  # high endpoint is exclusive; clipped so up/down > 1
+    "downsample_factor_range": (1, 2),  # dataset sampling fixes downsample_factor to 1
     "ebw_range": (0.1, 1.0),  # SRRC excess bandwidth
     "channel": "awgn",
     "rician_k_range": (3.0, 12.0),  # dB
@@ -459,6 +459,14 @@ def generate_signal(
     return result
 
 
+_worker_params: Optional[dict] = None
+
+
+def _init_worker(params: dict) -> None:
+    global _worker_params
+    _worker_params = params
+
+
 def generate_dataset(
     modulations: Iterable[str],
     n_signals: int,
@@ -477,9 +485,10 @@ def generate_dataset(
     if num_workers == 1:
         results = (_generate_dataset_signal(i, design[i], params, debug, rng) for i in range(n_signals))
     else:
-        tasks = ((i, design[i], params, debug) for i in range(n_signals))
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            results = executor.map(_generate_dataset_signal_worker, tasks)
+        chunksize = max(1, n_signals // (num_workers * 4))
+        tasks = ((i, design[i], debug) for i in range(n_signals))
+        with ProcessPoolExecutor(max_workers=num_workers, initializer=_init_worker, initargs=(params,)) as executor:
+            results = executor.map(_generate_dataset_signal_worker, tasks, chunksize=chunksize)
 
     for i, signal_data in tqdm(results, total=n_signals, desc="Generating signals"):
         dataset[i] = signal_data["signal"]
@@ -515,7 +524,7 @@ def _generate_dataset_signal(
             cpo=row["cpo"],
             n_samples=int(params["n_samples"]),
             signal_id=signal_id,
-            channel=params["channel"],
+            channel=row["channel"],
             rician_k_db=row["rician_k_db"],
             n_taps=row["n_taps"],
             delay_spread_symbols=row["delay_spread_symbols"],
@@ -527,9 +536,10 @@ def _generate_dataset_signal(
         raise RuntimeError(f"Failed to generate signal_id={signal_id}") from exc
 
 
-def _generate_dataset_signal_worker(args: Tuple[int, Dict, dict, bool]) -> Tuple[int, Dict]:
-    signal_id, row, params, debug = args
-    return _generate_dataset_signal(signal_id, row, params, debug)
+def _generate_dataset_signal_worker(args: Tuple[int, Dict, bool]) -> Tuple[int, Dict]:
+    signal_id, row, debug = args
+    assert _worker_params is not None
+    return _generate_dataset_signal(signal_id, row, _worker_params, debug)
 
 
 def sample_parameter_design(
@@ -541,23 +551,30 @@ def sample_parameter_design(
     sampler = params.get("sampler", "sobol")
     if sampler == "sobol":
         seed = params.get("seed")
-        sobol = qmc.Sobol(d=11, scramble=True, seed=seed)
+        sobol = qmc.Sobol(d=10, scramble=True, seed=seed)
         unit = sobol.random(n_signals)
     elif sampler == "random":
-        unit = rng.random((n_signals, 11))
+        unit = rng.random((n_signals, 10))
     else:
         raise ValueError(f"Unsupported sampler: {sampler}")
 
+    raw_channels = params.get("channel", "awgn")
+    channels: Tuple[str, ...] = (raw_channels,) if isinstance(raw_channels, str) else tuple(raw_channels)
+
     labels = balanced_modulation_labels(n_signals, modulations, rng)
-    osr_pairs = osr_factor_pairs(params["upsample_factor_range"], params["downsample_factor_range"])
+    channel_assignments = balanced_modulation_labels(n_signals, channels, rng)
+    upsample_factor_range = (max(2, params["upsample_factor_range"][0]), params["upsample_factor_range"][1])
+    if upsample_factor_range[0] >= upsample_factor_range[1]:
+        raise ValueError("upsample_factor_range produces no valid factors >= 2.")
     rows = []
     for i in range(n_signals):
         u = unit[i]
-        osr, pairs = osr_pairs[scale_int(u[4], (0, len(osr_pairs)))]
-        upsample_factor, downsample_factor = pairs[scale_int(u[5], (0, len(pairs)))]
+        upsample_factor = scale_int(u[4], upsample_factor_range)
+        downsample_factor = 1
         rows.append(
             {
                 "modulation": labels[i],
+                "channel": channel_assignments[i],
                 "snr_db": scale_float(u[0], params["snr_range"]),
                 "cfo": scale_float(u[1], params["cfo_range"]),
                 "cpo": scale_float(u[2], params["cpo_range"]),
@@ -565,31 +582,14 @@ def sample_parameter_design(
                 "upsample_factor": upsample_factor,
                 "downsample_factor": downsample_factor,
                 "osr": float(upsample_factor / downsample_factor),
-                "ebw": scale_float(u[6], params["ebw_range"]),
-                "rician_k_db": scale_float(u[7], params["rician_k_range"]),
-                "n_taps": scale_int(u[8], params["n_taps_range"]),
-                "delay_spread_symbols": scale_float(u[9], params["delay_spread_symbols_range"]),
-                "delay_decay_symbols": scale_float(u[10], params["delay_decay_symbols_range"]),
+                "ebw": scale_float(u[5], params["ebw_range"]),
+                "rician_k_db": scale_float(u[6], params["rician_k_range"]),
+                "n_taps": scale_int(u[7], params["n_taps_range"]),
+                "delay_spread_symbols": scale_float(u[8], params["delay_spread_symbols_range"]),
+                "delay_decay_symbols": scale_float(u[9], params["delay_decay_symbols_range"]),
             }
         )
     return rows
-
-
-def osr_factor_pairs(
-    upsample_factor_range: Tuple[int, int],
-    downsample_factor_range: Tuple[int, int],
-) -> List[Tuple[float, List[Tuple[int, int]]]]:
-    up_low, up_high = upsample_factor_range
-    down_low, down_high = downsample_factor_range
-    pairs_by_osr: Dict[float, List[Tuple[int, int]]] = {}
-    for up in range(max(2, up_low), up_high):
-        for down in range(max(1, down_low), down_high):
-            if up / down <= 1:
-                continue
-            pairs_by_osr.setdefault(up / down, []).append((up, down))
-    if not pairs_by_osr:
-        raise ValueError("upsample/downsample factor ranges produce no valid up/down > 1 ratios.")
-    return sorted(pairs_by_osr.items(), key=lambda item: item[0])
 
 
 def balanced_modulation_labels(n_signals: int, modulations: Tuple[str, ...], rng: np.random.Generator) -> np.ndarray:

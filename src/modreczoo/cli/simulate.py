@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Tuple
 
-from modreczoo.data import METADATA_FILE, SIGNALS_FILE, save_dataset
+from modreczoo.data import EXTRAS_FILE, METADATA_FILE, SIGNALS_FILE, save_dataset
 from modreczoo.simulation import (
     DEFAULT_PARAMS,
     MODULATIONS,
@@ -53,10 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PARAMS["downsample_factor_range"],
     )
     generate.add_argument("--ebw-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["ebw_range"])
-    generate.add_argument("--channel", choices=("awgn", "rayleigh", "rician", "soft_limiter"), default=DEFAULT_PARAMS["channel"])
+    generate.add_argument(
+        "--channel",
+        choices=("awgn", "rayleigh", "rician", "soft_limiter"),
+        nargs="+",
+        default=[DEFAULT_PARAMS["channel"]],
+    )
     generate.add_argument("--sampler", choices=("sobol", "random"), default=DEFAULT_PARAMS["sampler"])
     generate.add_argument("--num-workers", type=int, default=1)
-    generate.add_argument("--compressed", action="store_true", help="Write compressed NPZ instead of faster uncompressed NPZ.")
     generate.add_argument("--rician-k-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["rician_k_range"])
     generate.add_argument("--n-taps-range", type=lambda v: parse_range(v, int), default=DEFAULT_PARAMS["n_taps_range"])
     generate.add_argument(
@@ -116,7 +120,6 @@ def main() -> None:
                 "delay_decay_symbols_range": args.delay_decay_symbols_range,
                 "seed": args.seed,
                 "num_workers": args.num_workers,
-                "compressed": args.compressed,
             }
         )
         signals, metadata, extras = generate_dataset(
@@ -126,8 +129,10 @@ def main() -> None:
             debug=args.debug,
             num_workers=args.num_workers,
         )
-        save_dataset(args.output_dir, signals, metadata, extras=extras, compressed=args.compressed)
+        save_dataset(args.output_dir, signals, metadata, extras=extras)
         manifest = {"signals": SIGNALS_FILE, "metadata": METADATA_FILE, "params": params, "modulations": list(args.modulations)}
+        if extras:
+            manifest["extras"] = EXTRAS_FILE
         with open(Path(args.output_dir) / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
         print(f"Wrote {len(metadata)} signals to {os.path.abspath(args.output_dir)}")
