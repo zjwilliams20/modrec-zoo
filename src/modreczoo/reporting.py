@@ -373,8 +373,20 @@ def _metadata_histogram_figure(predictions: pl.DataFrame) -> go.Figure:
             categories = sorted(set(correct_counts) | set(error_counts), key=str)
             traces.extend(
                 [
-                    go.Bar(x=categories, y=[correct_counts.get(c, 0) for c in categories], name="Correct", visible=visible),
-                    go.Bar(x=categories, y=[error_counts.get(c, 0) for c in categories], name="Errors", visible=visible),
+                    go.Bar(
+                        x=categories,
+                        y=[correct_counts.get(c, 0) for c in categories],
+                        name="Correct",
+                        opacity=0.7,
+                        visible=visible,
+                    ),
+                    go.Bar(
+                        x=categories,
+                        y=[error_counts.get(c, 0) for c in categories],
+                        name="Errors",
+                        opacity=0.7,
+                        visible=visible,
+                    ),
                 ]
             )
         buttons.append(
