@@ -320,6 +320,8 @@ def write_manifest(output_dir: Path, metadata: pl.DataFrame, result: dict) -> No
         "counters": {
             key: result[key]
             for key in (
+                "batch_fraction",
+                "seed",
                 "metadata_rows",
                 "tim_sources",
                 "skipped_missing_metadata",
@@ -332,12 +334,36 @@ def write_manifest(output_dir: Path, metadata: pl.DataFrame, result: dict) -> No
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
+def _select_per_batch(
+    ids: list[int],
+    sources: dict[int, TimSource],
+    batch_fraction: float,
+    seed: int | None = None,
+) -> list[int]:
+    """Return a sorted subset of ids taking batch_fraction from each batch."""
+    if batch_fraction >= 1.0:
+        return ids
+    rng = np.random.default_rng(seed)
+    by_batch: dict[int | None, list[int]] = {}
+    for idx in ids:
+        batch = _batch_from_source(sources[idx])
+        by_batch.setdefault(batch, []).append(idx)
+    selected: list[int] = []
+    for batch_ids in by_batch.values():
+        n = max(1, math.ceil(len(batch_ids) * batch_fraction))
+        chosen = rng.choice(batch_ids, size=n, replace=False)
+        selected.extend(chosen.tolist())
+    return sorted(selected)
+
+
 def convert_cspb_dataset(
     input_dir: str | Path,
     metadata_path: str | Path,
     output_dir: str | Path,
     num_workers: int = 1,
     max_signals: int | None = None,
+    batch_fraction: float = 1.0,
+    seed: int | None = None,
     force: bool = False,
     download_if_missing: bool = False,
     batches: Iterable[int] = range(1, 29),
@@ -346,6 +372,8 @@ def convert_cspb_dataset(
     num_workers = max(1, int(num_workers))
     if max_signals is not None and max_signals <= 0:
         raise ValueError("--max-signals must be positive when provided.")
+    if not (0.0 < batch_fraction <= 1.0):
+        raise ValueError("--batch-fraction must be in (0, 1].")
     output_dir = Path(output_dir)
     if output_dir.exists() and any((output_dir / name).exists() for name in (SIGNALS_FILE, METADATA_FILE)):
         if not force:
@@ -365,6 +393,7 @@ def convert_cspb_dataset(
     sources = discover_tim_sources(input_dir, batches=batches)
     metadata_by_id = parse_metadata_file(metadata_path)
     selected_ids = sorted(set(sources) & set(metadata_by_id))
+    selected_ids = _select_per_batch(selected_ids, sources, batch_fraction, seed=seed)
     if max_signals is not None:
         selected_ids = selected_ids[:max_signals]
     if not selected_ids:
@@ -401,6 +430,8 @@ def convert_cspb_dataset(
         "output_dir": str(output_dir),
         "n_signals": int(signals.shape[0]),
         "n_samples": int(signals.shape[1]),
+        "batch_fraction": batch_fraction,
+        "seed": seed,
         "metadata_rows": len(metadata_by_id),
         "tim_sources": len(sources),
         "skipped_missing_metadata": len(set(sources) - set(metadata_by_id)),
@@ -423,6 +454,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default="data/cspb_2018r2/converted")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-signals", type=int, default=None)
+    parser.add_argument(
+        "--batch-fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of each batch to include (0, 1]. Default 1.0 (all). "
+             "Use e.g. 0.1 to take 10%% of every batch for broad coverage.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="RNG seed for per-batch random selection.")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--download-if-missing", action="store_true")
     parser.add_argument("--batches", default="1-28", help="Batch numbers to download, such as '1-8' or '1,3,8'.")
@@ -438,6 +477,8 @@ def main() -> None:
         output_dir=args.output_dir,
         num_workers=args.num_workers,
         max_signals=args.max_signals,
+        batch_fraction=args.batch_fraction,
+        seed=args.seed,
         force=args.force,
         download_if_missing=args.download_if_missing,
         batches=parse_batches(args.batches),
