@@ -8,6 +8,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import scipy.signal as sp_signal
 
 from modreczoo.simulation import (
     MODEMS,
@@ -699,3 +700,291 @@ def plot_dataset_metadata(
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
+
+
+def interactive_iq_explorer(
+    dataset_dir: str | Path,
+    nperseg: int = 256,
+    noverlap: int = 192,
+    nfft: int = 512,
+    window: str = "hann",
+    max_time_points: int = 6000,
+    width: int | None = None,
+    height: int = 760,
+):
+    """Display a Jupyter IQ time/frequency/spectrogram explorer for a dataset."""
+    import ipywidgets as widgets
+    import plotly.graph_objects as go
+    from IPython.display import clear_output, display
+
+    from modreczoo.data import load_dataset
+
+    _close_previous_iq_explorer()
+    clear_output(wait=True)
+
+    signals, metadata = load_dataset(str(dataset_dir))
+
+    def filter_options(col: str) -> list[tuple[str, object | None]]:
+        if col not in metadata.columns:
+            return [("All", None)]
+        values = metadata[col].drop_nulls().unique().to_list()
+
+        def sort_key(v):
+            try:
+                return (0, float(v))
+            except (TypeError, ValueError):
+                return (1, str(v))
+
+        return [("All", None)] + [(str(_explorer_fmt(v)), v) for v in sorted(values, key=sort_key)]
+
+    def float_range_for(col: str) -> tuple[float, float, float]:
+        if col not in metadata.columns:
+            return 0.0, 0.0, 1.0
+        values = metadata[col].drop_nulls().cast(pl.Float64).to_numpy()
+        if len(values) == 0:
+            return 0.0, 0.0, 1.0
+        lo = float(np.floor(values.min()))
+        hi = float(np.ceil(values.max()))
+        return lo, hi, 1.0 if hi - lo > 5 else 0.25
+
+    modulation_filter = widgets.Dropdown(options=filter_options("modulation"), description="mod", layout=widgets.Layout(width="260px"))
+    osr_filter = widgets.Dropdown(options=filter_options("osr"), description="OSR", layout=widgets.Layout(width="180px"))
+    snr_lo, snr_hi, snr_step = float_range_for("snr_db")
+    snr_filter = widgets.FloatRangeSlider(
+        value=(snr_lo, snr_hi),
+        min=snr_lo,
+        max=snr_hi,
+        step=snr_step,
+        description="SNR",
+        continuous_update=False,
+        readout_format=".2f",
+        disabled="snr_db" not in metadata.columns,
+        layout=widgets.Layout(width="360px"),
+    )
+    row = widgets.IntSlider(
+        value=0,
+        min=0,
+        max=max(len(metadata) - 1, 0),
+        step=1,
+        description="match",
+        continuous_update=True,
+        layout=widgets.Layout(width="850px"),
+    )
+    count_label = widgets.HTML()
+    current_indices = np.arange(len(metadata), dtype=np.int64)
+
+    def filtered_indices() -> np.ndarray:
+        df = metadata.with_row_index("_row_idx")
+        if modulation_filter.value is not None and "modulation" in df.columns:
+            df = df.filter(pl.col("modulation") == modulation_filter.value)
+        if osr_filter.value is not None and "osr" in df.columns:
+            df = df.filter(pl.col("osr") == osr_filter.value)
+        if "snr_db" in df.columns:
+            snr_min, snr_max = snr_filter.value
+            df = df.filter(pl.col("snr_db").is_between(snr_min, snr_max, closed="both"))
+        return df["_row_idx"].to_numpy()
+
+    def sync_slider(reset: bool = False) -> None:
+        nonlocal current_indices
+        current_indices = filtered_indices()
+        row.max = max(len(current_indices) - 1, 0)
+        if reset:
+            row.value = 0
+        else:
+            row.value = min(row.value, row.max)
+        count_label.value = f"<b>{len(current_indices):,}</b> matching signals"
+
+    def selected_figure():
+        return iq_explorer_figure(
+            signals,
+            metadata,
+            int(current_indices[min(row.value, len(current_indices) - 1)]),
+            dataset_name=Path(dataset_dir).name,
+            nperseg=nperseg,
+            noverlap=noverlap,
+            nfft=nfft,
+            window=window,
+            max_time_points=max_time_points,
+            width=width,
+            height=height,
+        )
+
+    sync_slider(reset=True)
+    fig = go.FigureWidget(selected_figure())
+
+    def clear_figure() -> None:
+        with fig.batch_update():
+            fig.data[0].cells.values = [["status"], ["No signals match the selected filters."]]
+            for trace in fig.data[1:4]:
+                trace.x = []
+                trace.y = []
+            fig.data[4].x = []
+            fig.data[4].y = []
+            fig.data[4].z = [[]]
+            fig.layout.title = "No matching signals"
+
+    def update_figure() -> None:
+        if len(current_indices) == 0:
+            clear_figure()
+            return
+        updated = selected_figure()
+        with fig.batch_update():
+            for dst, src in zip(fig.data, updated.data):
+                dst.update(src)
+            fig.layout.update(updated.layout)
+
+    def redraw(change=None) -> None:
+        update_figure()
+
+    def refilter(change=None) -> None:
+        sync_slider(reset=True)
+        update_figure()
+
+    ui = widgets.VBox([widgets.HBox([modulation_filter, osr_filter, snr_filter, count_label]), row, fig])
+    display(ui)
+
+    for widget in (modulation_filter, osr_filter, snr_filter):
+        widget.observe(refilter, names="value")
+    row.observe(redraw, names="value")
+
+    ui._modreczoo_figure = fig
+    ui._modreczoo_signals = signals
+    ui._modreczoo_metadata = metadata
+    globals()["_CURRENT_IQ_EXPLORER"] = ui
+    return ui
+
+
+def _close_previous_iq_explorer() -> None:
+    previous = globals().get("_CURRENT_IQ_EXPLORER")
+    if previous is None:
+        return
+    children = getattr(previous, "children", ())
+    for child in children:
+        close = getattr(child, "close", None)
+        if close is not None:
+            close()
+    close = getattr(previous, "close", None)
+    if close is not None:
+        close()
+    globals()["_CURRENT_IQ_EXPLORER"] = None
+
+
+def iq_explorer_figure(
+    signals: np.ndarray,
+    metadata: pl.DataFrame,
+    row_idx: int,
+    dataset_name: str = "dataset",
+    nperseg: int = 256,
+    noverlap: int = 192,
+    nfft: int = 512,
+    window: str = "hann",
+    max_time_points: int = 6000,
+    width: int | None = None,
+    height: int = 760,
+):
+    """Build an aligned Plotly time/frequency/spectrogram figure for one signal."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    from modreczoo.data import normalize_signal
+
+    x = normalize_signal(np.asarray(signals[int(row_idx)]))
+    n = len(x)
+    time_stride = max(1, int(np.ceil(n / max_time_points)))
+    t = np.arange(n)[::time_stride]
+    xt = x[::time_stride]
+    spec_freq, spec_time, spec_db = _explorer_stft(x, nperseg, noverlap, nfft, window)
+    fft_freq, fft_db = _explorer_spectrum(x)
+    meta_keys, meta_vals = _explorer_metadata_table(metadata, row_idx)
+
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        specs=[[{"type": "table"}, {"type": "xy"}], [{"type": "xy"}, {"type": "xy"}]],
+        column_widths=[0.24, 0.76],
+        row_heights=[0.28, 0.72],
+        horizontal_spacing=0.045,
+        vertical_spacing=0.055,
+    )
+    fig.add_trace(
+        go.Table(header={"values": ["field", "value"], "align": "left"}, cells={"values": [meta_keys, meta_vals], "align": "left"}),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Scatter(x=t, y=np.real(xt), name="I", mode="lines", line={"width": 1}), row=1, col=2)
+    fig.add_trace(go.Scatter(x=t, y=np.imag(xt), name="Q", mode="lines", line={"width": 1}), row=1, col=2)
+    fig.add_trace(go.Scatter(x=fft_db, y=fft_freq, name="FFT", mode="lines", line={"width": 1.2}, showlegend=False), row=2, col=1)
+    fig.add_trace(
+        go.Heatmap(x=spec_time, y=spec_freq, z=spec_db, colorscale="Inferno", colorbar={"title": "dB rel."}, name="STFT"),
+        row=2,
+        col=2,
+    )
+
+    fig.update_xaxes(matches="x3", range=[0, n - 1], showticklabels=False, row=1, col=2)
+    fig.update_xaxes(title_text="sample index", range=[0, n - 1], row=2, col=2)
+    fig.update_yaxes(title_text="amplitude", row=1, col=2)
+    fig.update_yaxes(matches="y3", range=[-0.5, 0.5], row=2, col=1)
+    fig.update_yaxes(title_text="cycles/sample", range=[-0.5, 0.5], row=2, col=2)
+    fig.update_xaxes(title_text="FFT magnitude, dB", row=2, col=1)
+
+    title = f"{dataset_name} row {row_idx}"
+    if "modulation" in metadata.columns:
+        title += f" | {metadata[int(row_idx), 'modulation']}"
+    fig.update_layout(
+        title=title,
+        width=width,
+        height=height,
+        template="plotly_white",
+        hovermode="closest",
+        margin={"l": 45, "r": 35, "t": 60, "b": 45},
+        legend={"orientation": "h", "x": 0.32, "y": 1.03},
+    )
+    return fig
+
+
+def _explorer_metadata_table(metadata: pl.DataFrame, row_idx: int) -> tuple[list[str], list[str]]:
+    row = metadata.row(int(row_idx), named=True)
+    preferred = ["signal_id", "modulation", "snr_db", "osr", "ebw", "sto", "cfo", "cpo", "channel", "n_samples"]
+    keys = [k for k in preferred if k in row]
+    keys += [k for k in row if k not in keys][: max(0, 12 - len(keys))]
+    return keys, [_explorer_fmt(row[k]) for k in keys]
+
+
+def _explorer_fmt(value) -> str:
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    text = str(value)
+    return text if len(text) <= 64 else text[:61] + "..."
+
+
+def _explorer_stft(x: np.ndarray, nperseg: int, noverlap: int, nfft: int, window: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    nperseg = min(int(nperseg), len(x))
+    noverlap = min(int(noverlap), nperseg - 1)
+    nfft = max(int(nfft), nperseg)
+    freqs, times, zxx = sp_signal.spectrogram(
+        x,
+        fs=1.0,
+        window=window,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        nfft=nfft,
+        detrend=False,
+        return_onesided=False,
+        scaling="spectrum",
+        mode="complex",
+    )
+    freqs = np.fft.fftshift(freqs)
+    zxx = np.fft.fftshift(zxx, axes=0)
+    power_db = 10.0 * np.log10(np.abs(zxx) ** 2 + np.finfo(float).eps)
+    power_db -= np.max(power_db)
+    return freqs, times, power_db
+
+
+def _explorer_spectrum(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    spec = np.fft.fftshift(np.fft.fft(x * np.hanning(len(x))))
+    freqs = np.fft.fftshift(np.fft.fftfreq(len(x), d=1.0))
+    scale = max(np.max(np.abs(spec)), np.finfo(float).eps)
+    mag_db = 20.0 * np.log10(np.abs(spec) / scale + np.finfo(float).eps)
+    return freqs, mag_db
