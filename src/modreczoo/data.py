@@ -35,7 +35,22 @@ def save_dataset(
 def load_dataset(output_dir: str) -> Tuple[np.ndarray, pl.DataFrame]:
     output = Path(output_dir)
     signals = np.load(output / SIGNALS_FILE, mmap_mode="r")
-    return signals, pl.read_parquet(output / METADATA_FILE)
+    metadata = pl.read_parquet(output / METADATA_FILE)
+    metadata = ensure_symbol_metadata(metadata)
+    return signals, metadata
+
+
+def ensure_symbol_metadata(metadata: pl.DataFrame) -> pl.DataFrame:
+    if "symbol_period" not in metadata.columns:
+        metadata = metadata.with_columns(pl.lit(1).alias("symbol_period"))
+    if "symbol_rate" not in metadata.columns and {"upsample_factor", "downsample_factor", "symbol_period"} <= set(metadata.columns):
+        metadata = metadata.with_columns(
+            (
+                pl.col("upsample_factor").cast(pl.Float64)
+                / (pl.col("symbol_period").cast(pl.Float64) * pl.col("downsample_factor").cast(pl.Float64))
+            ).alias("symbol_rate")
+        )
+    return metadata
 
 
 class ModrecDataset(Dataset):
