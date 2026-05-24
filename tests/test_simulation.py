@@ -16,10 +16,9 @@ def test_parameter_design_samples_integer_osr_above_one() -> None:
     params["seed"] = 3
     rows = sample_parameter_design(64, ("2PSK", "MSK"), params, rng_from_seed(3))
 
-    assert all(row["upsample_factor"] >= 2 for row in rows)
     assert all(row["downsample_factor"] == 1 for row in rows)
-    assert all(row["upsample_factor"] / row["downsample_factor"] > 1 for row in rows)
-    assert all(row["osr"] == row["upsample_factor"] / row["downsample_factor"] for row in rows)
+    assert all(row["osr"] >= 1 for row in rows)
+    assert all(row["osr"] == row["symbol_period"] * row["upsample_factor"] / row["downsample_factor"] for row in rows)
     assert all(float(row["osr"]).is_integer() for row in rows)
 
 
@@ -45,30 +44,30 @@ def test_parameter_design_samples_upsample_factors_uniformly() -> None:
 def test_apply_pulse_shape_resamples_in_one_step_and_skips_srrc_for_msk() -> None:
     rng = rng_from_seed(4)
     symbols, _ = generate_symbols("4PSK", 32, rng)
-    shaped = apply_pulse_shape(symbols, "4PSK", upsample_factor=5, downsample_factor=2, ebw=0.35)
+    # symbol_period=1: classic single-stage SRRC path
+    shaped = apply_pulse_shape(symbols, "4PSK", symbol_period=1, upsample_factor=5, downsample_factor=2, ebw=0.35)
 
     assert shaped.dtype == np.complex128
     assert len(shaped) > len(symbols)
     assert np.isclose(np.mean(np.abs(shaped) ** 2), 1.0)
 
     msk_symbols, _ = generate_symbols("MSK", 32, rng)
-    msk = apply_pulse_shape(msk_symbols, "MSK", upsample_factor=4, downsample_factor=1, ebw=0.35)
+    msk = apply_pulse_shape(msk_symbols, "MSK", symbol_period=1, upsample_factor=4, downsample_factor=1, ebw=0.35)
     assert np.count_nonzero(np.abs(msk) > 1e-12) / len(msk) > 0.9
 
+    # symbol_period>1: two-stage path — SRRC at symbol_period then pure resample
+    shaped2 = apply_pulse_shape(symbols, "4PSK", symbol_period=4, upsample_factor=2, downsample_factor=1, ebw=0.35)
+    assert shaped2.dtype == np.complex128
+    assert len(shaped2) > len(symbols)
+    assert np.isclose(np.mean(np.abs(shaped2) ** 2), 1.0)
 
-def test_apply_pulse_shape_requires_real_oversampling() -> None:
+
+def test_apply_pulse_shape_requires_osr_at_least_one() -> None:
     symbols = np.ones(4, dtype=np.complex128)
     try:
-        apply_pulse_shape(symbols, "2PSK", upsample_factor=1, downsample_factor=1, ebw=0.35)
+        apply_pulse_shape(symbols, "2PSK", symbol_period=1, upsample_factor=1, downsample_factor=2, ebw=0.35)
     except ValueError as exc:
-        assert "upsample_factor" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
-
-    try:
-        apply_pulse_shape(symbols, "2PSK", upsample_factor=2, downsample_factor=2, ebw=0.35)
-    except ValueError as exc:
-        assert "greater than 1" in str(exc)
+        assert ">= 1" in str(exc)
     else:
         raise AssertionError("expected ValueError")
 
@@ -97,6 +96,7 @@ def test_generate_dataset_metadata_uses_fixed_downsample_factor() -> None:
     signals, metadata, _ = generate_dataset(("2PSK",), 2, params, num_workers=1)
 
     assert signals.shape == (2, 128)
+    assert metadata["symbol_period"].to_list() == [1, 1]
     assert metadata["upsample_factor"].to_list() == [4, 4]
     assert metadata["downsample_factor"].to_list() == [1, 1]
     assert metadata["osr"].to_list() == [4.0, 4.0]
@@ -106,6 +106,6 @@ if __name__ == "__main__":
     test_parameter_design_samples_integer_osr_above_one()
     test_parameter_design_samples_upsample_factors_uniformly()
     test_apply_pulse_shape_resamples_in_one_step_and_skips_srrc_for_msk()
-    test_apply_pulse_shape_requires_real_oversampling()
+    test_apply_pulse_shape_requires_osr_at_least_one()
     test_in_band_noise_fraction_uses_srrc_bandwidth()
     test_generate_dataset_metadata_uses_fixed_downsample_factor()

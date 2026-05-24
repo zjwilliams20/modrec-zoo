@@ -62,7 +62,7 @@ def plot_modulation_summary(
     seed: Optional[int],
 ) -> plt.Figure:
     symbols, _ = generate_symbols(modulation, k_symbols, rng)
-    waveform = apply_pulse_shape(symbols, modulation, osr, 1, ebw)
+    waveform = apply_pulse_shape(symbols, modulation, symbol_period=1, upsample_factor=osr, downsample_factor=1, ebw=ebw)
     waveform = waveform[: k_symbols * osr]
     freq, spectrum_db = normalized_spectrum(waveform)
 

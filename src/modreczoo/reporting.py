@@ -20,6 +20,7 @@ EXCLUDED_SLICE_COLUMNS = {
 }
 EXACT_NUMERIC_COLUMNS = {
     "osr",
+    "symbol_period",
     "upsample_factor",
     "downsample_factor",
     "n_samples",
@@ -433,6 +434,7 @@ def _metadata_dimensions(predictions: pl.DataFrame) -> list[str]:
     preferred = (
         "snr_db",
         "osr",
+        "symbol_period",
         "ebw",
         "sto",
         "cfo",
@@ -466,7 +468,7 @@ def _confidence_figure(predictions: pl.DataFrame) -> go.Figure:
 
 
 def _high_confidence_errors_figure(predictions: pl.DataFrame) -> go.Figure:
-    cols = [c for c in ("signal_id", "true_label", "pred_label", "confidence", "nll_bits", "snr_db", "osr", "ebw", "sto", "cfo") if c in predictions.columns]
+    cols = [c for c in ("signal_id", "true_label", "pred_label", "confidence", "nll_bits", "snr_db", "osr", "symbol_period", "ebw", "sto", "cfo") if c in predictions.columns]
     rows = predictions.filter(~pl.col("correct")).sort("confidence", descending=True).head(25)
     values = [rows[c].to_list() for c in cols]
     fig = go.Figure(data=[go.Table(header={"values": cols}, cells={"values": values})])

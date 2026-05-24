@@ -22,7 +22,8 @@ DEFAULT_PARAMS = {
     "cfo_range": (-1 / 1000, 1 / 1000),  # cycles per sample
     "cpo_range": (0.0, 1.0),  # cycles
     "sto_range": (-1 / 2, 1 / 2),  # symbols
-    "upsample_factor_range": (2, 11),  # high endpoint is exclusive
+    "symbol_period_range": (1, 11),  # samp/sym for pulse shaping; high endpoint exclusive
+    "upsample_factor_range": (2, 11),  # waveform upsample after pulse shaping; high endpoint exclusive
     "downsample_factor_range": (1, 2),  # dataset sampling fixes downsample_factor to 1
     "ebw_range": (0.1, 1.0),  # SRRC excess bandwidth
     "channel": "awgn",
@@ -224,23 +225,43 @@ def trim_filter_delay(x: np.ndarray, n_taps: int, downsample_factor: int) -> np.
 def apply_pulse_shape(
     symbols: np.ndarray,
     modulation: str,
+    symbol_period: int,
     upsample_factor: int,
     downsample_factor: int,
     ebw: float,
 ) -> np.ndarray:
-    if upsample_factor < 2:
-        raise ValueError("upsample_factor must be at least 2.")
+    if symbol_period < 1:
+        raise ValueError("symbol_period must be at least 1.")
+    if upsample_factor < 1:
+        raise ValueError("upsample_factor must be at least 1.")
     if downsample_factor < 1:
         raise ValueError("downsample_factor must be at least 1.")
-    if upsample_factor / downsample_factor <= 1:
-        raise ValueError("upsample_factor / downsample_factor must be greater than 1.")
+    osr = symbol_period * upsample_factor / downsample_factor
+    if osr < 1.0:
+        raise ValueError(f"symbol_period * upsample_factor / downsample_factor must be >= 1, got {osr:.3f}.")
 
-    if modulation == "MSK":
-        taps = np.ones(upsample_factor, dtype=float)
+    if symbol_period > 1:
+        # Stage 1: pulse shape at symbol_period samp/sym using SRRC.
+        if modulation == "MSK":
+            taps = np.ones(symbol_period, dtype=float)
+        else:
+            taps = srrc_filter(symbol_period, ebw)
+        shaped = signal.upfirdn(taps, symbols, up=symbol_period, down=1)
+        shaped = trim_filter_delay(shaped, len(taps), 1)
+        # Stage 2: pure waveform resample — no additional pulse shaping filter.
+        if upsample_factor != 1 or downsample_factor != 1:
+            shaped = signal.resample_poly(shaped, upsample_factor, downsample_factor)
     else:
-        taps = srrc_filter(upsample_factor, ebw)
-    shaped = signal.upfirdn(taps, symbols, up=upsample_factor, down=downsample_factor)
-    return normalize_power(trim_filter_delay(shaped, len(taps), downsample_factor))
+        # symbol_period == 1: classic single-stage path — SRRC designed at the full
+        # waveform upsample_factor, matching the original OSR-only behaviour.
+        if modulation == "MSK":
+            taps = np.ones(upsample_factor, dtype=float)
+        else:
+            taps = srrc_filter(upsample_factor, ebw)
+        shaped = signal.upfirdn(taps, symbols, up=upsample_factor, down=downsample_factor)
+        shaped = trim_filter_delay(shaped, len(taps), downsample_factor)
+
+    return normalize_power(shaped)
 
 
 def apply_cfo(x: np.ndarray, cfo: float, cpo: float = 0.0) -> np.ndarray:
@@ -396,6 +417,7 @@ def generate_signal(
     downsample_factor: int,
     ebw: float,
     cpo: float = 0.0,
+    symbol_period: int = 1,
     n_samples: int = 32768,
     signal_id: int = 0,
     channel: str = "awgn",
@@ -407,11 +429,11 @@ def generate_signal(
     debug: bool = False,
 ) -> Dict:
     rng = rng if rng is not None else rng_from_seed(None)
-    osr = upsample_factor / downsample_factor
+    osr = symbol_period * upsample_factor / downsample_factor
     n_symbols = int(math.ceil(n_samples / osr)) + 16
     symbols, bits = generate_symbols(modulation, n_symbols, rng)
 
-    shaped = pad_or_trim(apply_pulse_shape(symbols, modulation, upsample_factor, downsample_factor, ebw), n_samples)
+    shaped = pad_or_trim(apply_pulse_shape(symbols, modulation, symbol_period, upsample_factor, downsample_factor, ebw), n_samples)
     shifted = apply_cfo(shaped, cfo, cpo=cpo)
     shifted = apply_sto(shifted, sto, osr)
     faded, channel_metadata = apply_channel(
@@ -433,6 +455,7 @@ def generate_signal(
         "cfo": float(cfo),
         "cpo": float(cpo),
         "sto": float(sto),
+        "symbol_period": int(symbol_period),
         "upsample_factor": int(upsample_factor),
         "downsample_factor": int(downsample_factor),
         "osr": float(osr),
@@ -518,6 +541,7 @@ def _generate_dataset_signal(
             snr_db=row["snr_db"],
             cfo=row["cfo"],
             sto=row["sto"],
+            symbol_period=row["symbol_period"],
             upsample_factor=row["upsample_factor"],
             downsample_factor=row["downsample_factor"],
             ebw=row["ebw"],
@@ -551,10 +575,10 @@ def sample_parameter_design(
     sampler = params.get("sampler", "sobol")
     if sampler == "sobol":
         seed = params.get("seed")
-        sobol = qmc.Sobol(d=10, scramble=True, seed=seed)
+        sobol = qmc.Sobol(d=11, scramble=True, seed=seed)
         unit = sobol.random(n_signals)
     elif sampler == "random":
-        unit = rng.random((n_signals, 10))
+        unit = rng.random((n_signals, 11))
     else:
         raise ValueError(f"Unsupported sampler: {sampler}")
 
@@ -563,12 +587,16 @@ def sample_parameter_design(
 
     labels = balanced_modulation_labels(n_signals, modulations, rng)
     channel_assignments = balanced_modulation_labels(n_signals, channels, rng)
-    upsample_factor_range = (max(2, params["upsample_factor_range"][0]), params["upsample_factor_range"][1])
+    symbol_period_range = (max(1, params["symbol_period_range"][0]), params["symbol_period_range"][1])
+    if symbol_period_range[0] >= symbol_period_range[1]:
+        raise ValueError("symbol_period_range produces no valid values >= 1.")
+    upsample_factor_range = (max(1, params["upsample_factor_range"][0]), params["upsample_factor_range"][1])
     if upsample_factor_range[0] >= upsample_factor_range[1]:
-        raise ValueError("upsample_factor_range produces no valid factors >= 2.")
+        raise ValueError("upsample_factor_range produces no valid factors >= 1.")
     rows = []
     for i in range(n_signals):
         u = unit[i]
+        symbol_period = scale_int(u[10], symbol_period_range)
         upsample_factor = scale_int(u[4], upsample_factor_range)
         downsample_factor = 1
         rows.append(
@@ -579,9 +607,10 @@ def sample_parameter_design(
                 "cfo": scale_float(u[1], params["cfo_range"]),
                 "cpo": scale_float(u[2], params["cpo_range"]),
                 "sto": scale_float(u[3], params["sto_range"]),
+                "symbol_period": symbol_period,
                 "upsample_factor": upsample_factor,
                 "downsample_factor": downsample_factor,
-                "osr": float(upsample_factor / downsample_factor),
+                "osr": float(symbol_period * upsample_factor / downsample_factor),
                 "ebw": scale_float(u[5], params["ebw_range"]),
                 "rician_k_db": scale_float(u[6], params["rician_k_range"]),
                 "n_taps": scale_int(u[7], params["n_taps_range"]),

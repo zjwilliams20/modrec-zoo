@@ -260,23 +260,29 @@ def _metadata_compensated_samples(
     metadata: dict,
     config: OracleConfig,
 ) -> list[np.ndarray]:
+    symbol_period = int(metadata.get("symbol_period", 1))
     upsample_factor = int(metadata.get("upsample_factor", round(float(metadata["osr"]))))
     downsample_factor = int(metadata.get("downsample_factor", 1))
-    osr = float(metadata.get("osr", upsample_factor / downsample_factor))
+    osr = float(metadata.get("osr", symbol_period * upsample_factor / downsample_factor))
     x = _undo_channel(x, metadata)
     x = _undo_sto(x, float(metadata.get("sto", 0.0)), osr)
     x = _undo_cfo_cpo(x, float(metadata["cfo"]), float(metadata.get("cpo", 0.0)))
-    x = _matched_filter(
-        x,
-        upsample_factor,
-        downsample_factor,
-        float(metadata["ebw"]),
-        str(metadata["modulation"]),
-    )
+
+    if symbol_period > 1:
+        # Invert stage 2: undo waveform resample back to symbol_period samp/sym.
+        if upsample_factor != 1 or downsample_factor != 1:
+            x = signal.resample_poly(x, downsample_factor, upsample_factor)
+        # Invert stage 1: matched filter designed at symbol_period samp/sym.
+        x = _matched_filter(x, symbol_period, 1, float(metadata["ebw"]), str(metadata["modulation"]))
+        sample_stride = symbol_period
+    else:
+        # Classic single-stage path: SRRC at upsample_factor samp/sym.
+        x = _matched_filter(x, upsample_factor, downsample_factor, float(metadata["ebw"]), str(metadata["modulation"]))
+        sample_stride = upsample_factor
 
     sampled = []
-    for offset in range(upsample_factor):
-        symbols = x[offset::upsample_factor]
+    for offset in range(sample_stride):
+        symbols = x[offset::sample_stride]
         if len(symbols) > 2 * config.edge_symbols:
             symbols = symbols[config.edge_symbols : -config.edge_symbols]
         if len(symbols):

@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--cpo-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["cpo_range"])
     generate.add_argument("--sto-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["sto_range"])
     generate.add_argument(
+        "--symbol-period-range",
+        type=lambda v: parse_range(v, int),
+        default=DEFAULT_PARAMS["symbol_period_range"],
+    )
+    generate.add_argument(
         "--upsample-factor-range",
         type=lambda v: parse_range(v, int),
         default=DEFAULT_PARAMS["upsample_factor_range"],
@@ -109,6 +114,7 @@ def main() -> None:
                 "cfo_range": args.cfo_range,
                 "cpo_range": args.cpo_range,
                 "sto_range": args.sto_range,
+                "symbol_period_range": args.symbol_period_range,
                 "upsample_factor_range": args.upsample_factor_range,
                 "downsample_factor_range": args.downsample_factor_range,
                 "ebw_range": args.ebw_range,
