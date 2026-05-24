@@ -22,7 +22,7 @@ DEFAULT_PARAMS = {
     "cfo_range": (-1 / 1000, 1 / 1000),  # cycles per sample
     "cpo_range": (0.0, 1.0),  # cycles
     "sto_range": (-1 / 2, 1 / 2),  # symbols
-    "symbol_period_range": (1, 11),  # samp/sym for pulse shaping; high endpoint exclusive
+    "symbol_period_range": (1, 16),  # samp/sym for pulse shaping; high endpoint exclusive
     "upsample_factor_range": (2, 11),  # waveform upsample after pulse shaping; high endpoint exclusive
     "downsample_factor_range": (1, 2),  # dataset sampling fixes downsample_factor to 1
     "ebw_range": (0.1, 1.0),  # SRRC excess bandwidth
