@@ -263,9 +263,10 @@ def _metadata_compensated_samples(
     symbol_period = int(metadata.get("symbol_period", 1))
     upsample_factor = int(metadata.get("upsample_factor", round(float(metadata["osr"]))))
     downsample_factor = int(metadata.get("downsample_factor", 1))
-    osr = float(metadata.get("osr", symbol_period * upsample_factor / downsample_factor))
+    osr = float(metadata.get("osr", upsample_factor / downsample_factor))
+    samples_per_symbol = symbol_period * osr
     x = _undo_channel(x, metadata)
-    x = _undo_sto(x, float(metadata.get("sto", 0.0)), osr)
+    x = _undo_sto(x, float(metadata.get("sto", 0.0)), samples_per_symbol)
     x = _undo_cfo_cpo(x, float(metadata["cfo"]), float(metadata.get("cpo", 0.0)))
 
     if symbol_period > 1:
@@ -349,9 +350,10 @@ def _unit_power(x: np.ndarray) -> np.ndarray:
 
 def _symbol_noise_variance(metadata: dict, config: OracleConfig) -> float:
     snr_linear = 10 ** (float(metadata["snr_db"]) / 10)
+    symbol_period = int(metadata.get("symbol_period", 1))
     osr = float(metadata.get("osr", float(metadata.get("upsample_factor", 1)) / float(metadata.get("downsample_factor", 1))))
     ebw = float(metadata.get("ebw", 1.0))
-    return max(1.0 / (snr_linear * in_band_noise_fraction(osr, ebw)), config.min_noise_variance)
+    return max(1.0 / (snr_linear * in_band_noise_fraction(symbol_period * osr, ebw)), config.min_noise_variance)
 
 
 def _modulation_log_likelihood(samples_by_offset: list[np.ndarray], modulation: str, noise_variance: float) -> float:

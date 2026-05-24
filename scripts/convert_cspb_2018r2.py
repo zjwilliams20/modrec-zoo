@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import math
+
 import numpy as np
 import polars as pl
 from tqdm import tqdm
@@ -225,8 +227,9 @@ def parse_metadata_file(path: str | Path) -> dict[int, dict]:
             upsample_factor = float(parts[5])
             downsample_factor = float(parts[6])
             noise_spectral_density_db = float(parts[8])
-            resample_ratio = 1.0 if downsample_factor == 0 else downsample_factor / upsample_factor
-            symbol_rate = (1.0 / base_symbol_period) * resample_ratio
+            # downsample_factor == 0 means no resampling; the signal is stored at
+            # base_symbol_period * upsample_factor samples/symbol.
+            effective_downsample = 1.0 if downsample_factor == 0 else downsample_factor
 
             rows[cspb_signal_index] = {
                 "cspb_signal_index": cspb_signal_index,
@@ -235,12 +238,12 @@ def parse_metadata_file(path: str | Path) -> dict[int, dict]:
                 "snr_db": float(parts[7]),
                 "cfo": float(parts[3]),
                 "ebw": float(parts[4]),
-                "base_symbol_period": base_symbol_period,
-                "upsample_factor": upsample_factor,
-                "downsample_factor": downsample_factor,
+                "symbol_period": int(base_symbol_period),
+                "upsample_factor": int(upsample_factor),
+                "downsample_factor": int(downsample_factor),
                 "noise_spectral_density_db": noise_spectral_density_db,
-                "symbol_rate": symbol_rate,
-                "osr": 1.0 / symbol_rate,
+                "osr": float(upsample_factor / effective_downsample),
+                "symbol_rate": float(upsample_factor / (base_symbol_period * effective_downsample)),
             }
     return rows
 

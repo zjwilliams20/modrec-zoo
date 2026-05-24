@@ -944,7 +944,7 @@ def iq_explorer_figure(
 
 def _explorer_metadata_table(metadata: pl.DataFrame, row_idx: int) -> tuple[list[str], list[str]]:
     row = metadata.row(int(row_idx), named=True)
-    preferred = ["signal_id", "modulation", "snr_db", "osr", "ebw", "sto", "cfo", "cpo", "channel", "n_samples"]
+    preferred = ["signal_id", "modulation", "snr_db", "osr", "symbol_period", "symbol_rate", "ebw", "sto", "cfo", "cpo", "channel", "n_samples"]
     keys = [k for k in preferred if k in row]
     keys += [k for k in row if k not in keys][: max(0, 12 - len(keys))]
     return keys, [_explorer_fmt(row[k]) for k in keys]
