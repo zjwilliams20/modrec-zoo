@@ -204,6 +204,7 @@ def evaluate_and_log_test_set(
     dataset_dir: str,
     seed: int,
     device: torch.device,
+    n_samples: Optional[int] = None,
 ) -> Dict:
     from modreczoo.plotting import (
         plot_accuracy_by_ebw,
@@ -216,7 +217,7 @@ def evaluate_and_log_test_set(
         plot_reliability_diagram,
     )
     labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
-    loader = get_data_loader(signals, metadata, idx, label_to_id, shuffle=False, **loader_kwargs)
+    loader = get_data_loader(signals, metadata, idx, label_to_id, shuffle=False, n_samples=n_samples, **loader_kwargs)
     test_metrics = evaluate(model, loader, device, len(label_to_id), desc=name)
     del loader
     gc.collect()
@@ -558,13 +559,13 @@ def train_one_model(
         print(f"Loaded {extra_dir}: signals={extra_signals.shape} dtype={extra_signals.dtype}.")
         validate_known_labels(extra_metadata, labels_ordered, extra_dir, "Extra test")
         extra_name = Path(extra_dir).stem
-        extra_signals = pad_or_trim_signals(extra_signals, train_signals.shape[1])
         extra_idx = np.arange(len(extra_metadata), dtype=np.int64)
         try:
             evaluate_and_log_test_set(
                 extra_name, model, extra_signals, extra_metadata, extra_idx,
                 label_to_id, id_to_label, loader_kwargs, artifact_dir,
                 extra_dir, args.seed, device,
+                n_samples=train_signals.shape[1],
             )
         finally:
             del extra_signals, extra_metadata, extra_idx

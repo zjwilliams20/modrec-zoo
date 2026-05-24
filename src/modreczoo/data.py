@@ -54,6 +54,7 @@ class ModrecDataset(Dataset):
         spectrogram_nperseg: int = 64,
         spectrogram_noverlap: int = 48,
         spectrogram_window: str = "hann",
+        n_samples: Optional[int] = None,
     ) -> None:
         self.signals = signals
         self.metadata = metadata
@@ -68,6 +69,7 @@ class ModrecDataset(Dataset):
         self.spectrogram_nperseg = spectrogram_nperseg
         self.spectrogram_noverlap = spectrogram_noverlap
         self.spectrogram_window = spectrogram_window
+        self.n_samples = n_samples
         self.labels = metadata["modulation"].to_numpy()
 
     def __len__(self) -> int:
@@ -76,6 +78,11 @@ class ModrecDataset(Dataset):
     def __getitem__(self, item: int) -> Tuple[torch.Tensor, torch.Tensor]:
         idx = int(self.indices[item])
         x = normalize_signal(self.signals[idx])
+        if self.n_samples is not None:
+            if x.shape[0] > self.n_samples:
+                x = x[: self.n_samples]
+            elif x.shape[0] < self.n_samples:
+                x = np.pad(x, (0, self.n_samples - x.shape[0]), mode="constant")
         if self.remove_cfo:
             x = remove_empirical_cfo(x, estimator=self.cfo_estimator)
         y = self.label_to_id[str(self.labels[idx])]
@@ -121,6 +128,7 @@ def get_data_loader(
     spectrogram_window: str = "hann",
     pin_memory: bool = True,
     persistent_workers: bool = True,
+    n_samples: Optional[int] = None,
     **loader_kwargs,
 ) -> DataLoader:
     dataset = ModrecDataset(
@@ -137,6 +145,7 @@ def get_data_loader(
         spectrogram_nperseg=spectrogram_nperseg,
         spectrogram_noverlap=spectrogram_noverlap,
         spectrogram_window=spectrogram_window,
+        n_samples=n_samples,
     )
     if num_workers > 0:
         loader_kwargs.setdefault("persistent_workers", persistent_workers)
