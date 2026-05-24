@@ -7,4 +7,5 @@ plotly
 torch
 mlflow
 scikit-learn
+psutil
 nvidia-ml-py

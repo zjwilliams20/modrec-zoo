@@ -55,6 +55,8 @@ MLFLOW_DB = MLFLOW_DIR / "mlflow.db"
 MLFLOW_ARTIFACTS = MLFLOW_DIR / "artifacts"
 MLFLOW_STAGING = MLFLOW_DIR / "staging"
 EXPERIMENT_NAME = "modrec"
+SYSTEM_METRICS_SAMPLING_INTERVAL_SEC = 5
+SYSTEM_METRICS_SAMPLES_BEFORE_LOGGING = 1
 
 
 def sync_if_cuda(device: torch.device) -> None:
@@ -620,6 +622,9 @@ def input_channels_for(representation: str, channel_format: str) -> int:
 def configure_mlflow(experiment_name: str = EXPERIMENT_NAME) -> None:
     MLFLOW_ARTIFACTS.mkdir(parents=True, exist_ok=True)
     MLFLOW_STAGING.mkdir(parents=True, exist_ok=True)
+    mlflow.enable_system_metrics_logging()
+    mlflow.set_system_metrics_sampling_interval(SYSTEM_METRICS_SAMPLING_INTERVAL_SEC)
+    mlflow.set_system_metrics_samples_before_logging(SYSTEM_METRICS_SAMPLES_BEFORE_LOGGING)
     mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_DB.absolute()}")
     client = MlflowClient()
     experiment = client.get_experiment_by_name(experiment_name)
@@ -861,7 +866,7 @@ def run_config(
             f"Adjusted test signal length from {test_n_samples_original} "
             f"to train length {test_signals.shape[1]}."
         )
-    with mlflow.start_run(run_name=run_name_for(args, model_name)) as run:
+    with mlflow.start_run(run_name=run_name_for(args, model_name), log_system_metrics=True) as run:
         log_common_params(args, model_name, train_signals, test_signals, labels, sweep_index, sweep_total)
         if config_yaml is not None:
             mlflow.log_text(config_yaml, "config.yaml")
