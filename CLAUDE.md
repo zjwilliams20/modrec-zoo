@@ -50,6 +50,18 @@ src/modreczoo/
     plot_spectrograms.py — modreczoo-plot-spectrograms
 ```
 
+## Dataset Metadata Columns
+
+Key signal-parameter columns written to `metadata.parquet` by `simulation.py`:
+
+- `symbol_period` — samples/symbol at the pulse-shaping stage (integer ≥ 2)
+- `upsample_factor`, `downsample_factor` — rational resampling applied after pulse shaping; approximate a target drawn from `osr_range`
+- `osr` — realized resampling ratio: `upsample_factor / downsample_factor` (not samples/symbol)
+- `symbol_rate` — normalized symbol rate at the output sample rate: `1 / (symbol_period * osr)`
+- Effective samples/symbol at output: `symbol_period * osr`
+
+`osr` and `symbol_rate` are decoupled: `osr` captures only the resampling stage; `symbol_period` captures the pulse-shaping resolution.
+
 ## Channel Formats
 
 Defined in `training.py`: `real_imag`, `mag`, `mag_phase`, `mag_inst_freq`, `differential_complex`, `apf`, `complex_powers`, `scf`. Input channel count comes from `input_channels_for(representation, channel_format)`. Models needing a fixed format (e.g. `scf_resnet` → `scf`) declare it in `MODEL_REQUIRED_CHANNEL_FORMATS` and it auto-overrides `--channel-format`.

@@ -1,3 +1,18 @@
+"""Synthetic I/Q generation and simulation metadata.
+
+Sampling metadata terms:
+- ``symbol_period``: samples per symbol used for the initial pulse-shaping filter.
+- ``osr``: post-pulse-shaping resampling ratio, equal to
+  ``upsample_factor / downsample_factor``.
+- ``upsample_factor`` and ``downsample_factor``: coarse rational approximation
+  of the requested ``osr_range``.
+- Effective samples per symbol: ``symbol_period * osr``.
+- ``symbol_rate``: normalized post-resampling symbol rate, equal to
+  ``1 / (symbol_period * osr)``.
+- ``osr_range``: generator input range for desired OSR; metadata records only
+  the realized rational approximation as ``osr``.
+"""
+
 import json
 import math
 from concurrent.futures import ProcessPoolExecutor
@@ -23,8 +38,7 @@ DEFAULT_PARAMS = {
     "cpo_range": (0.0, 1.0),  # cycles
     "sto_range": (-1 / 2, 1 / 2),  # symbols
     "symbol_period_range": (2, 16),  # samp/sym for pulse shaping; high endpoint exclusive
-    "upsample_factor_range": (1, 11),  # waveform upsample after pulse shaping; high endpoint exclusive
-    "downsample_factor_range": (1, 10),  # dataset sampling fixes downsample_factor to 1
+    "osr_range": (1.0, 2.0),  # desired up/down resampling ratio before rational approximation
     "ebw_range": (0.1, 1.0),  # SRRC excess bandwidth
     "channel": "awgn",
     "rician_k_range": (3.0, 12.0),  # dB
@@ -34,6 +48,8 @@ DEFAULT_PARAMS = {
     "sampler": "sobol",
     "seed": None,
 }
+
+RATIONAL_RESAMPLE_MAX_FACTOR = 10
 
 
 @dataclass(frozen=True)
@@ -236,9 +252,9 @@ def apply_pulse_shape(
         raise ValueError("upsample_factor must be at least 1.")
     if downsample_factor < 1:
         raise ValueError("downsample_factor must be at least 1.")
-    osr = symbol_period * upsample_factor / downsample_factor
-    if osr < 1.0:
-        raise ValueError(f"symbol_period * upsample_factor / downsample_factor must be >= 1, got {osr:.3f}.")
+    samples_per_symbol = symbol_period * upsample_factor / downsample_factor
+    if samples_per_symbol < 2.0:
+        raise ValueError(f"symbol_period * upsample_factor / downsample_factor must be >= 2, got {samples_per_symbol:.3f}.")
 
     # Stage 1: pulse shape at symbol_period samp/sym using SRRC.
     if modulation == "MSK":
@@ -407,7 +423,7 @@ def generate_signal(
     downsample_factor: int,
     ebw: float,
     cpo: float = 0.0,
-    symbol_period: int = 1,
+    symbol_period: int = 2,
     n_samples: int = 32768,
     signal_id: int = 0,
     channel: str = "awgn",
@@ -419,24 +435,25 @@ def generate_signal(
     debug: bool = False,
 ) -> Dict:
     rng = rng if rng is not None else rng_from_seed(None)
-    osr = symbol_period * upsample_factor / downsample_factor
-    n_symbols = int(math.ceil(n_samples / osr)) + 16
+    osr = upsample_factor / downsample_factor
+    samples_per_symbol = symbol_period * osr
+    n_symbols = int(math.ceil(n_samples / samples_per_symbol)) + 16
     symbols, bits = generate_symbols(modulation, n_symbols, rng)
 
     shaped = pad_or_trim(apply_pulse_shape(symbols, modulation, symbol_period, upsample_factor, downsample_factor, ebw), n_samples)
     shifted = apply_cfo(shaped, cfo, cpo=cpo)
-    shifted = apply_sto(shifted, sto, osr)
+    shifted = apply_sto(shifted, sto, samples_per_symbol)
     faded, channel_metadata = apply_channel(
         shifted,
         channel,
         rng,
-        osr=osr,
+        osr=samples_per_symbol,
         rician_k_db=rician_k_db,
         n_taps=n_taps,
         delay_spread_symbols=delay_spread_symbols,
         delay_decay_symbols=delay_decay_symbols,
     )
-    received = add_awgn(faded, snr_db, rng, osr=osr, ebw=ebw)
+    received = add_awgn(faded, snr_db, rng, osr=samples_per_symbol, ebw=ebw)
 
     metadata = {
         "signal_id": signal_id,
@@ -448,8 +465,8 @@ def generate_signal(
         "symbol_period": int(symbol_period),
         "upsample_factor": int(upsample_factor),
         "downsample_factor": int(downsample_factor),
-        "osr": float(upsample_factor / downsample_factor),
-        "symbol_rate": float(upsample_factor / (symbol_period * downsample_factor)),
+        "osr": float(osr),
+        "symbol_rate": float(1.0 / samples_per_symbol),
         "ebw": float(ebw),
         "n_samples": int(n_samples),
         "n_symbols": int(n_symbols),
@@ -581,19 +598,19 @@ def sample_parameter_design(
     symbol_period_range = (max(1, params["symbol_period_range"][0]), params["symbol_period_range"][1])
     if symbol_period_range[0] >= symbol_period_range[1]:
         raise ValueError("symbol_period_range produces no valid values >= 1.")
-    upsample_factor_range = (max(1, params["upsample_factor_range"][0]), params["upsample_factor_range"][1])
-    if upsample_factor_range[0] >= upsample_factor_range[1]:
-        raise ValueError("upsample_factor_range produces no valid factors >= 1.")
-    downsample_factor_range = (max(1, params["downsample_factor_range"][0]), params["downsample_factor_range"][1])
-    if downsample_factor_range[0] >= downsample_factor_range[1]:
-        raise ValueError("downsample_factor_range produces no valid factors >= 1.")
+    osr_range = params.get("osr_range", DEFAULT_PARAMS["osr_range"])
+    if osr_range[0] <= 0 or osr_range[0] >= osr_range[1]:
+        raise ValueError("osr_range must be a positive low,high range.")
     rows = []
     for i in range(n_signals):
         u = unit[i]
         symbol_period = scale_int(u[10], symbol_period_range)
-        upsample_factor = scale_int(u[4], upsample_factor_range)
-        # Clamp so that symbol_period * upsample_factor / downsample_factor >= 1.
-        downsample_factor = min(scale_int(u[11], downsample_factor_range), symbol_period * upsample_factor)
+        desired_osr = scale_float(u[4], osr_range)
+        upsample_factor, downsample_factor = rational_resample_factors(
+            desired_osr,
+            min_ratio=2.0 / symbol_period,
+        )
+        osr = upsample_factor / downsample_factor
         rows.append(
             {
                 "modulation": labels[i],
@@ -605,8 +622,8 @@ def sample_parameter_design(
                 "symbol_period": symbol_period,
                 "upsample_factor": upsample_factor,
                 "downsample_factor": downsample_factor,
-                "osr": float(upsample_factor / downsample_factor),
-                "symbol_rate": float(upsample_factor / (symbol_period * downsample_factor)),
+                "osr": float(osr),
+                "symbol_rate": float(1.0 / (symbol_period * osr)),
                 "ebw": scale_float(u[5], params["ebw_range"]),
                 "rician_k_db": scale_float(u[6], params["rician_k_range"]),
                 "n_taps": scale_int(u[7], params["n_taps_range"]),
@@ -615,6 +632,28 @@ def sample_parameter_design(
             }
         )
     return rows
+
+
+def rational_resample_factors(
+    target_ratio: float,
+    min_ratio: float = 0.0,
+    max_factor: int = RATIONAL_RESAMPLE_MAX_FACTOR,
+) -> Tuple[int, int]:
+    """Approximate target_ratio with a small up/down factor pair."""
+    best: Optional[Tuple[float, int, int, int]] = None
+    for upsample_factor in range(1, max_factor + 1):
+        for downsample_factor in range(1, max_factor + 1):
+            ratio = upsample_factor / downsample_factor
+            if ratio < min_ratio:
+                continue
+            error = abs(ratio - target_ratio)
+            score = (error, upsample_factor + downsample_factor, upsample_factor, downsample_factor)
+            if best is None or score < best:
+                best = score
+    if best is None:
+        raise ValueError("No valid rational resampling factors.")
+    _, _, upsample_factor, downsample_factor = best
+    return upsample_factor, downsample_factor
 
 
 def balanced_modulation_labels(n_signals: int, modulations: Tuple[str, ...], rng: np.random.Generator) -> np.ndarray:

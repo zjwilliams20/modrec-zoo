@@ -32,27 +32,27 @@ def test_read_tim_bytes_complex() -> None:
     assert np.allclose(parsed, x)
 
 
-def test_parse_metadata_maps_labels_and_effective_osr(tmp_path: Path) -> None:
+def test_parse_metadata_maps_labels_and_sampling_metadata(tmp_path: Path) -> None:
     path = tmp_path / "signal_record.txt"
-    # row 1: downsample_factor=0 (no resampling) → osr = base_symbol_period * upsample_factor = 10*5 = 50
-    # row 2: downsample_factor=2               → osr = base_symbol_period * upsample_factor / downsample_factor = 8*4/2 = 16
+    # row 1: downsample_factor=0 means no resampling, so standard metadata uses effective downsample_factor=1.
+    # row 2: downsample_factor=2 gives osr = upsample_factor / downsample_factor = 4/2 = 2.
     path.write_text("1 dqpsk 10 -1e-4 0.35 5 0 7.0 0.0\n2 64qam 8 2e-4 0.5 4 2 3.0 0.0\n")
 
     rows = converter.parse_metadata_file(path)
 
     assert rows[1]["modulation"] == "pi/4-DQPSK"
     assert rows[1]["snr_db"] == 7.0
-    assert rows[1]["base_symbol_period"] == 10.0
     assert rows[1]["symbol_period"] == 10
     assert rows[1]["upsample_factor"] == 5
-    assert rows[1]["downsample_factor"] == 0
-    assert rows[1]["osr"] == 50.0
+    assert rows[1]["downsample_factor"] == 1
+    assert rows[1]["osr"] == 5.0
+    assert rows[1]["symbol_rate"] == 1.0 / 50.0
     assert rows[2]["modulation"] == "64QAM"
-    assert rows[2]["base_symbol_period"] == 8.0
     assert rows[2]["symbol_period"] == 8
     assert rows[2]["upsample_factor"] == 4
     assert rows[2]["downsample_factor"] == 2
-    assert rows[2]["osr"] == 16.0
+    assert rows[2]["osr"] == 2.0
+    assert rows[2]["symbol_rate"] == 1.0 / 16.0
 
 
 def test_discover_tim_sources_prefers_extracted_over_zip(tmp_path: Path) -> None:
@@ -151,7 +151,7 @@ def test_prepare_cspb_inputs_downloads_and_extracts_missing_files(tmp_path: Path
 if __name__ == "__main__":
     test_read_tim_bytes_complex()
     with TemporaryDirectory() as tmp:
-        test_parse_metadata_maps_labels_and_effective_osr(Path(tmp))
+        test_parse_metadata_maps_labels_and_sampling_metadata(Path(tmp))
     with TemporaryDirectory() as tmp:
         test_discover_tim_sources_prefers_extracted_over_zip(Path(tmp))
     with TemporaryDirectory() as tmp:

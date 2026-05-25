@@ -43,11 +43,13 @@ def load_dataset(output_dir: str) -> Tuple[np.ndarray, pl.DataFrame]:
 def ensure_symbol_metadata(metadata: pl.DataFrame) -> pl.DataFrame:
     if "symbol_period" not in metadata.columns:
         metadata = metadata.with_columns(pl.lit(1).alias("symbol_period"))
-    if "symbol_rate" not in metadata.columns and {"upsample_factor", "downsample_factor", "symbol_period"} <= set(metadata.columns):
+    if "symbol_rate" not in metadata.columns and {"osr", "symbol_period"} <= set(metadata.columns):
+        metadata = metadata.with_columns((1.0 / (pl.col("symbol_period").cast(pl.Float64) * pl.col("osr").cast(pl.Float64))).alias("symbol_rate"))
+    elif "symbol_rate" not in metadata.columns and {"upsample_factor", "downsample_factor", "symbol_period"} <= set(metadata.columns):
         metadata = metadata.with_columns(
             (
-                pl.col("upsample_factor").cast(pl.Float64)
-                / (pl.col("symbol_period").cast(pl.Float64) * pl.col("downsample_factor").cast(pl.Float64))
+                pl.col("downsample_factor").cast(pl.Float64)
+                / (pl.col("symbol_period").cast(pl.Float64) * pl.col("upsample_factor").cast(pl.Float64))
             ).alias("symbol_rate")
         )
     return metadata

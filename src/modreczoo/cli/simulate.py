@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
 
@@ -47,16 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda v: parse_range(v, int),
         default=DEFAULT_PARAMS["symbol_period_range"],
     )
-    generate.add_argument(
-        "--upsample-factor-range",
-        type=lambda v: parse_range(v, int),
-        default=DEFAULT_PARAMS["upsample_factor_range"],
-    )
-    generate.add_argument(
-        "--downsample-factor-range",
-        type=lambda v: parse_range(v, int),
-        default=DEFAULT_PARAMS["downsample_factor_range"],
-    )
+    generate.add_argument("--osr-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["osr_range"])
     generate.add_argument("--ebw-range", type=lambda v: parse_range(v, float), default=DEFAULT_PARAMS["ebw_range"])
     generate.add_argument(
         "--channel",
@@ -115,8 +108,7 @@ def main() -> None:
                 "cpo_range": args.cpo_range,
                 "sto_range": args.sto_range,
                 "symbol_period_range": args.symbol_period_range,
-                "upsample_factor_range": args.upsample_factor_range,
-                "downsample_factor_range": args.downsample_factor_range,
+                "osr_range": args.osr_range,
                 "ebw_range": args.ebw_range,
                 "channel": args.channel,
                 "sampler": args.sampler,
@@ -136,7 +128,22 @@ def main() -> None:
             num_workers=args.num_workers,
         )
         save_dataset(args.output_dir, signals, metadata, extras=extras)
-        manifest = {"signals": SIGNALS_FILE, "metadata": METADATA_FILE, "params": params, "modulations": list(args.modulations)}
+
+        def _git(*cmd: str) -> str:
+            try:
+                return subprocess.check_output(["git", *cmd], text=True, stderr=subprocess.DEVNULL).strip()
+            except Exception:
+                return "unknown"
+
+        manifest = {
+            "signals": SIGNALS_FILE,
+            "metadata": METADATA_FILE,
+            "params": params,
+            "modulations": list(args.modulations),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "git_hash": _git("rev-parse", "HEAD"),
+            "git_dirty": _git("status", "--porcelain") != "",
+        }
         if extras:
             manifest["extras"] = EXTRAS_FILE
         with open(Path(args.output_dir) / "manifest.json", "w", encoding="utf-8") as f:

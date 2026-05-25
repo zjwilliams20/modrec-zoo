@@ -228,8 +228,11 @@ def parse_metadata_file(path: str | Path) -> dict[int, dict]:
             downsample_factor = float(parts[6])
             noise_spectral_density_db = float(parts[8])
             # downsample_factor == 0 means no resampling; the signal is stored at
-            # base_symbol_period * upsample_factor samples/symbol.
+            # base_symbol_period * upsample_factor samples/symbol. Standard
+            # metadata stores the effective downsample factor so osr remains
+            # upsample_factor / downsample_factor.
             effective_downsample = 1.0 if downsample_factor == 0 else downsample_factor
+            osr = upsample_factor / effective_downsample
 
             rows[cspb_signal_index] = {
                 "cspb_signal_index": cspb_signal_index,
@@ -240,10 +243,10 @@ def parse_metadata_file(path: str | Path) -> dict[int, dict]:
                 "ebw": float(parts[4]),
                 "symbol_period": int(base_symbol_period),
                 "upsample_factor": int(upsample_factor),
-                "downsample_factor": int(downsample_factor),
+                "downsample_factor": int(effective_downsample),
                 "noise_spectral_density_db": noise_spectral_density_db,
-                "osr": float(upsample_factor / effective_downsample),
-                "symbol_rate": float(upsample_factor / (base_symbol_period * effective_downsample)),
+                "osr": float(osr),
+                "symbol_rate": float(1.0 / (base_symbol_period * osr)),
             }
     return rows
 

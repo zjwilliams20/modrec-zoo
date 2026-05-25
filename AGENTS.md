@@ -50,3 +50,10 @@
 * Datasets are `signals.npy`, optional `extras.npz`, and `metadata.parquet`.
 * `load_dataset()` is the standard entrypoint; avoid ad hoc metadata reads unless specifically needed.
 * Channel format handling happens in `ModrecDataset.__getitem__`; model-specific forced formats are defined in the registry.
+* Simulation sampling metadata terms:
+  * `symbol_period`: samples per symbol used for the initial pulse-shaping filter.
+  * `osr`: post-pulse-shaping resampling ratio, equal to `upsample_factor / downsample_factor`.
+  * `upsample_factor`, `downsample_factor`: coarse rational approximation of the requested `osr_range`.
+  * Effective samples per symbol: `symbol_period * osr`.
+  * `symbol_rate`: normalized post-resampling symbol rate, equal to `1 / (symbol_period * osr)`.
+  * `osr_range`: generator input range for desired OSR; metadata records only the realized rational approximation as `osr`.
