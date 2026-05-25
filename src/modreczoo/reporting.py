@@ -128,6 +128,7 @@ def write_performance_explorer(
         _high_confidence_errors_figure(predictions),
     ]
     divs = [_plot_div(fig, include_plotlyjs=i == 0) for i, fig in enumerate(figures)]
+    divs.insert(3, _2d_accuracy_div(predictions))
     cards = "".join(
         f"<div class='card'><div class='value'>{escape(value)}</div><div class='label'>{escape(label)}</div></div>"
         for label, value in _summary_cards(predictions, summary)
@@ -462,12 +463,79 @@ def _metadata_dimensions(predictions: pl.DataFrame) -> list[str]:
     return [c for c in preferred if c in predictions.columns]
 
 
+def _sorted_bin_labels(bins: np.ndarray, numeric: bool) -> list[str]:
+    unique = np.unique(bins)
+    order = np.argsort(_slice_sort_keys(unique, numeric), kind="stable")
+    return [str(unique[i]) for i in order]
+
+
 def _value_counts(values: list) -> dict:
     counts: dict = {}
     for value in values:
         key = "missing" if value is None else value
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _2d_accuracy_div(predictions: pl.DataFrame) -> str:
+    dims = _metadata_dimensions(predictions)[:8]
+    if len(dims) < 2:
+        return _plot_div(go.Figure().update_layout(title="2D Accuracy Heatmap"))
+    N = len(dims)
+    correct = predictions["correct"].to_numpy()
+    traces = []
+    for i, dim_x in enumerate(dims):
+        for j, dim_y in enumerate(dims):
+            x_bins = _slice_bins(dim_x, predictions[dim_x].to_numpy())
+            y_bins = _slice_bins(dim_y, predictions[dim_y].to_numpy())
+            x_labels = _sorted_bin_labels(x_bins, predictions.schema[dim_x].is_numeric())
+            y_labels = _sorted_bin_labels(y_bins, predictions.schema[dim_y].is_numeric())
+            xi_map = {v: idx for idx, v in enumerate(x_labels)}
+            yi_map = {v: idx for idx, v in enumerate(y_labels)}
+            acc: np.ndarray = np.full((len(y_labels), len(x_labels)), np.nan)
+            counts = np.zeros((len(y_labels), len(x_labels)), dtype=int)
+            for xb, yb, c in zip(x_bins, y_bins, correct):
+                ii, jj = xi_map.get(xb), yi_map.get(yb)
+                if ii is not None and jj is not None:
+                    counts[jj, ii] += 1
+                    acc[jj, ii] = (0.0 if np.isnan(acc[jj, ii]) else acc[jj, ii]) + float(c)
+            acc = np.where(counts > 0, acc / counts, np.nan)
+            traces.append(go.Heatmap(
+                z=acc, x=x_labels, y=y_labels, customdata=counts,
+                zmin=0.0, zmax=1.0, colorscale="RdYlGn",
+                visible=(i == 0 and j == 1),
+                hovertemplate=f"{dim_x}=%{{x}}<br>{dim_y}=%{{y}}<br>accuracy=%{{z:.3f}}<br>n=%{{customdata}}<extra></extra>",
+            ))
+    div_id = "plot-2d-accuracy"
+    fig = go.Figure(traces)
+    fig.update_layout(title="2D Accuracy Heatmap", xaxis_title=dims[0], yaxis_title=dims[1], height=540)
+    plot_html = pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id=div_id)
+    x_opts = "".join(f'<option value="{i}">{d}</option>' for i, d in enumerate(dims))
+    y_opts = "".join(f'<option value="{j}"{" selected" if j == 1 else ""}>{d}</option>' for j, d in enumerate(dims))
+    controls = (
+        f'<div style="padding:4px 0 8px">'
+        f'<label style="margin-right:16px">X: <select id="sel2d-x">{x_opts}</select></label>'
+        f'<label>Y: <select id="sel2d-y">{y_opts}</select></label>'
+        f'</div>'
+    )
+    script = f"""<script>
+(function() {{
+  var N = {N};
+  var selX = document.getElementById('sel2d-x');
+  var selY = document.getElementById('sel2d-y');
+  var div = document.getElementById('{div_id}');
+  function update() {{
+    var xi = parseInt(selX.value), yi = parseInt(selY.value);
+    var vis = Array(N * N).fill(false);
+    vis[xi * N + yi] = true;
+    Plotly.restyle(div, {{visible: vis}});
+    Plotly.relayout(div, {{'xaxis.title': selX.options[selX.selectedIndex].text, 'yaxis.title': selY.options[selY.selectedIndex].text}});
+  }}
+  selX.addEventListener('change', update);
+  selY.addEventListener('change', update);
+}})();
+</script>"""
+    return controls + plot_html + script
 
 
 def _confidence_figure(predictions: pl.DataFrame) -> go.Figure:
