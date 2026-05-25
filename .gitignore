@@ -3,7 +3,6 @@
 .jupyter/
 .jupyter_ystore.db
 __pycache__/
-.sisyphus
 *.py[cod]
 data
 plots
