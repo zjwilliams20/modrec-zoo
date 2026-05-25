@@ -8,7 +8,7 @@ set -euo pipefail
 # can be skipped via the RUN_GROUPS env var (see below).
 #
 # Env vars:
-#   DATASET_DIR   – path to dataset                  (default: data/spectrogram_high_snr_sobol_16384)
+#   DATASET_DIR   – path to dataset                  (default: data/baseline_4096)
 #   MAX_EXAMPLES  – cap on training examples          (default: 10000)
 #   EPOCHS        – epochs per run                    (default: 12)
 #   BATCH_SIZE                                        (default: 512)
@@ -19,7 +19,7 @@ set -euo pipefail
 #                   (default: all three)
 #   DRY_RUN       – print commands instead of running (default: 0)
 
-DATASET_DIR="${DATASET_DIR:-data/spectrogram_high_snr_sobol_16384}"
+DATASET_DIR="${DATASET_DIR:-data/baseline_4096}"
 MAX_EXAMPLES="${MAX_EXAMPLES:-16384}"
 EPOCHS="${EPOCHS:-12}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
@@ -40,13 +40,11 @@ COMMON_ARGS=(
   --num-workers "$NUM_WORKERS"
   --device "$DEVICE"
   --seed "$SEED"
-  --spectrogram-size 64
+  --spectrogram-freq-bins 64
+  --spectrogram-time-bins 64
   --spectrogram-nperseg 64
   --spectrogram-noverlap 48
-  --spectrogram-window kaiser
-  --spectrogram-window-beta 15
-  --spectrogram-base-channels 32
-  --channel-format mag_phase
+  --spectrogram-window kaiser:15
 )
 
 run_cmd() {
@@ -83,6 +81,8 @@ run_kernels() {
     printf "%-18s %10s %10s\n" "$name" "$fk" "$tk"
     run_cmd uv run modreczoo-train \
       "${COMMON_ARGS[@]}" \
+      --channel-format mag_phase \
+      --spectrogram-base-channels 32 \
       --spectrogram-freq-kernel "$fk" \
       --spectrogram-time-kernel "$tk" \
       --run-name "kernels-${name}"
@@ -94,28 +94,26 @@ run_kernels() {
 run_capacity() {
   echo
   echo "=== Group: capacity (fk=5 tk=3, mag_phase) ==="
-  printf "%-18s %13s %16s\n" name base_channels blocks_per_stage
-  printf "%-18s %13s %16s\n" ---- ------------- ----------------
+  printf "%-18s %13s\n" name base_channels
+  printf "%-18s %13s\n" ---- -------------
 
-  # name   base_channels  b0 b1 b2 b3
+  # name   base_channels
   local CONFIGS=(
-    "c24_shallow    24 1 1 1 1"
-    "c24_default    24 2 2 2 2"
-    "c32_shallow    32 1 1 1 1"
-    "c32_default    32 2 2 2 2"
-    "c32_deep       32 2 2 3 3"
-    "c48_default    48 2 2 2 2"
+    "c24    24"
+    "c32    32"
+    "c48    48"
+    "c64    64"
   )
 
   for config in "${CONFIGS[@]}"; do
-    read -r name bc b0 b1 b2 b3 <<< "$config"
-    printf "%-18s %13s %16s\n" "$name" "$bc" "$b0 $b1 $b2 $b3"
+    read -r name bc <<< "$config"
+    printf "%-18s %13s\n" "$name" "$bc"
     run_cmd uv run modreczoo-train \
       "${COMMON_ARGS[@]}" \
+      --channel-format mag_phase \
       --spectrogram-freq-kernel 5 \
       --spectrogram-time-kernel 3 \
       --spectrogram-base-channels "$bc" \
-      --spectrogram-blocks-per-stage "$b0" "$b1" "$b2" "$b3" \
       --run-name "capacity-${name}"
   done
 }
@@ -138,6 +136,7 @@ run_formats() {
     printf "%-18s %13s\n" "$name" "$fmt"
     run_cmd uv run modreczoo-train \
       "${COMMON_ARGS[@]}" \
+      --spectrogram-base-channels 32 \
       --spectrogram-freq-kernel 5 \
       --spectrogram-time-kernel 3 \
       --channel-format "$fmt" \

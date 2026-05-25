@@ -30,7 +30,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--command", choices=("train", "sweep", "oracle-cache"), default="train")
     parser.add_argument("--experiment-name", default="modrec", help="MLflow experiment name.")
     parser.add_argument("--run-name", default=None, help="Override the auto-generated MLflow run name.")
-    parser.add_argument("--dataset-dir", default="data/awgn_snr0_30")
+    parser.add_argument("--dataset-dir", default="data/baseline_4096")
     parser.add_argument("--force-oracle-cache", action="store_true")
     parser.add_argument(
         "--test-dataset-dir",

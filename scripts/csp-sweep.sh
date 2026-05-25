@@ -10,7 +10,7 @@
 #   multi_stream_1d    — differential_complex, complex_powers, multilag, cyclic_caf
 set -euo pipefail
 
-DATASET_DIR="${DATASET_DIR:-data/awgn_snr0_30}"
+DATASET_DIR="${DATASET_DIR:-data/baseline_4096}"
 MAX_EXAMPLES="${MAX_EXAMPLES:-16384}"
 EPOCHS="${EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-512}"

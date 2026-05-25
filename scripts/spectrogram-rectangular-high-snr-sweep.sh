@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATASET_DIR="${DATASET_DIR:-data/spectrogram_high_snr_sobol_16384}"
+DATASET_DIR="${DATASET_DIR:-data/baseline_4096}"
 MAX_EXAMPLES="${MAX_EXAMPLES:-10000}"
 EPOCHS="${EPOCHS:-12}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
@@ -22,8 +22,7 @@ COMMON_ARGS=(
   --num-workers "$NUM_WORKERS"
   --device "$DEVICE"
   --seed "$SEED"
-  --spectrogram-window kaiser
-  --spectrogram-window-beta 15
+  --spectrogram-window kaiser:15
 )
 
 CONFIGS=(

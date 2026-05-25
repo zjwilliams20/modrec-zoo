@@ -377,8 +377,7 @@ def plot_example_spectrograms(
     noverlap: int = 48,
     freq_bins: int = 64,
     time_bins: int = 64,
-    window: str = "kaiser",
-    window_beta: float = 15.0,
+    window: str = "kaiser:15",
 ) -> None:
     from modreczoo.data import normalize_signal, spectrogram_channels
 
@@ -400,7 +399,7 @@ def plot_example_spectrograms(
             x, channel_format="mag_phase",
             freq_bins=freq_bins, time_bins=time_bins,
             nperseg=nperseg, noverlap=noverlap,
-            window=window, window_beta=window_beta,
+            window=window,
         )[0]
 
     for row_idx, modulation in enumerate(modulations):

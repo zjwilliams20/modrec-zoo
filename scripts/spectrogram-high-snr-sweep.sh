@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATASET_DIR="${DATASET_DIR:-data/spectrogram_high_snr_sobol_16384}"
+DATASET_DIR="${DATASET_DIR:-data/baseline_4096}"
 MAX_EXAMPLES="${MAX_EXAMPLES:-10000}"
 EPOCHS="${EPOCHS:-12}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
@@ -36,21 +36,24 @@ CONFIGS=(
   "kaiser15        64  64  48 kaiser 15"
 )
 
-printf "%-16s %4s %8s %8s %-8s %5s\n" name size nperseg noverlap window beta
-printf "%-16s %4s %8s %8s %-8s %5s\n" ---- ---- ------- -------- ------ ----
+printf "%-16s %4s %8s %8s %-10s\n" name size nperseg noverlap window
+printf "%-16s %4s %8s %8s %-10s\n" ---- ---- ------- -------- ------
 
 for config in "${CONFIGS[@]}"; do
   read -r name size nperseg noverlap window beta <<< "$config"
-  printf "%-16s %4s %8s %8s %-8s %5s\n" "$name" "$size" "$nperseg" "$noverlap" "$window" "$beta"
+  if [[ "$window" == "kaiser" ]]; then
+    window="kaiser:${beta}"
+  fi
+  printf "%-16s %4s %8s %8s %-10s\n" "$name" "$size" "$nperseg" "$noverlap" "$window"
 
   cmd=(
     uv run modreczoo-train
     "${COMMON_ARGS[@]}"
-    --spectrogram-size "$size"
+    --spectrogram-freq-bins "$size"
+    --spectrogram-time-bins "$size"
     --spectrogram-nperseg "$nperseg"
     --spectrogram-noverlap "$noverlap"
     --spectrogram-window "$window"
-    --spectrogram-window-beta "$beta"
   )
 
   if [[ "$DRY_RUN" == "1" ]]; then

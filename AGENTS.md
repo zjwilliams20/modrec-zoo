@@ -15,7 +15,7 @@
 * Run Python entrypoints through `uv run`, for example:
   * `uv run modreczoo-simulate generate --output-dir data/awgn_sobol --n-signals 1000 --channel awgn --sampler sobol --seed 0`
   * `uv run modreczoo-train --dataset-dir data/awgn_sobol`
-  * `uv run modreczoo-train --command sweep --dataset-dir data/awgn_snr0_30 --models resnet_1d dilated_cnn_1d --sweep-channel-formats real_imag mag`
+  * `uv run modreczoo-train --command sweep --dataset-dir data/baseline_4096 --models resnet_1d dilated_cnn_1d --sweep-channel-formats real_imag mag_phase`
 * Open MLflow with `uv run mlflow ui --backend-store-uri sqlite:///mlflow/mlflow.db --host 127.0.0.1 --port 5000`.
 * Type checking, when useful: `uv run basedpyright src/`.
 * Prefer `python -m py_compile path/to/file.py` for quick syntax validation after edits.
