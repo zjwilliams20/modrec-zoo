@@ -289,17 +289,10 @@ def estimate_cfo_spectral_centroid(x: np.ndarray) -> float:
 def complex_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
     if channel_format == "real_imag":
         return np.stack((np.real(x), np.imag(x))).astype(np.float32)
-    if channel_format == "mag":
-        mag = normalized_log_magnitude(x)
-        return mag.astype(np.float32)[np.newaxis, :]
     if channel_format == "mag_phase":
         mag = normalized_log_magnitude(x)
         phase = np.angle(x) / np.pi
         return np.stack((mag, phase)).astype(np.float32)
-    if channel_format == "mag_inst_freq":
-        mag = normalized_log_magnitude(x)
-        inst_freq = instantaneous_frequency(x)
-        return np.stack((mag, inst_freq)).astype(np.float32)
     if channel_format == "differential_complex":
         return differential_complex_channels(x)
     if channel_format == "apf":
@@ -434,11 +427,6 @@ def spectrogram_channels(
         mode="complex",
     )
     zxx = np.fft.fftshift(zxx, axes=0)
-    if channel_format == "mag":
-        mag = np.log1p(np.abs(zxx))
-        mag = resize_2d(mag, freq_bins, time_bins)
-        mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
-        return mag[np.newaxis].astype(np.float32)
     if channel_format == "real_imag":
         real = resize_2d(np.real(zxx), freq_bins, time_bins)
         imag = resize_2d(np.imag(zxx), freq_bins, time_bins)
@@ -452,14 +440,6 @@ def spectrogram_channels(
         mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
         phase = phase / np.pi
         return np.stack((mag, phase)).astype(np.float32)
-    if channel_format == "mag_inst_freq":
-        mag = np.log1p(np.abs(zxx))
-        phase = np.unwrap(np.angle(zxx), axis=1)
-        inst_freq = np.diff(phase, axis=1, prepend=phase[:, :1]) / np.pi
-        mag = resize_2d(mag, freq_bins, time_bins)
-        inst_freq = resize_2d(inst_freq, freq_bins, time_bins)
-        mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
-        return np.stack((mag, np.nan_to_num(inst_freq))).astype(np.float32)
     if channel_format == "scf":
         return scf_channels(x, n_alpha=time_bins, n_freq=freq_bins, nperseg=nperseg)
     raise ValueError(f"Unsupported channel format: {channel_format}")

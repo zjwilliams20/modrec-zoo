@@ -129,9 +129,7 @@ run_formats() {
   printf "%-18s %13s\n" ---- --------------
 
   local CONFIGS=(
-    "mag             mag"
     "mag_phase       mag_phase"
-    "mag_inst_freq   mag_inst_freq"
     "real_imag       real_imag"
   )
 

@@ -162,9 +162,7 @@ The format is an input preprocessing step, not part of the model.
 | format               | channels | description                                                              |
 |----------------------|----------|--------------------------------------------------------------------------|
 | `real_imag`          | 2        | Raw I and Q — information-complete, no structure imposed                 |
-| `mag`                | 1        | `log(1+|x|)` normalized — amplitude only                                |
 | `mag_phase`          | 2        | Log-magnitude + unwrapped phase/π                                        |
-| `mag_inst_freq`      | 2        | Log-magnitude + Δphase/π (instantaneous frequency)                      |
 | `differential_complex` | 2      | `Re(d), Im(d)` where `d[n]=x[n]·x*[n-1]`, RMS-normalized               |
 | `apf`                | 4        | `[log\|x\|, cos∠x, sin∠x, Δ∠x/π]` — required by APFNet                |
 | `multilag`           | 6        | Re/Im of `x[n]·x*[n-τ]` for τ∈{1,4,16}, RMS-norm — required by `multilag_net_1d` |

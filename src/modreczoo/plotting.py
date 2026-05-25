@@ -397,7 +397,7 @@ def plot_example_spectrograms(
 
     def _render(x: np.ndarray) -> np.ndarray:
         return spectrogram_channels(
-            x, channel_format="mag",
+            x, channel_format="mag_phase",
             freq_bins=freq_bins, time_bins=time_bins,
             nperseg=nperseg, noverlap=noverlap,
             window=window, window_beta=window_beta,
@@ -435,9 +435,7 @@ def plot_example_spectrograms(
 
 _CHANNEL_NAMES = {
     "real_imag":           ["I", "Q"],
-    "mag":                 ["Mag"],
     "mag_phase":           ["Mag", "Phase"],
-    "mag_inst_freq":       ["Mag", "InstFreq"],
     "differential_complex":["Re(d)", "Im(d)"],
     "apf":                 ["LogMag", "cos(ph)", "sin(ph)", "InstFreq"],
     "complex_powers":      ["Re(x)", "Im(x)", "Re(x²)", "Im(x²)", "Re(x⁴)", "Im(x⁴)"],

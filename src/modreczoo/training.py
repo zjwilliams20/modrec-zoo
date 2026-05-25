@@ -40,7 +40,7 @@ from modreczoo.reporting import build_prediction_table, error_slice_table, write
 CFO_ESTIMATORS = ("lag_correlation", "phase_slope", "spectral_centroid")
 CFO_SWEEP_MODES = ("raw", *CFO_ESTIMATORS)
 CHANNEL_FORMATS = (
-    "real_imag", "mag", "mag_phase", "mag_inst_freq", "differential_complex",
+    "real_imag", "mag_phase", "differential_complex",
     "apf", "complex_powers", "multilag", "cyclic_caf", "scf",
 )
 MODEL_NAMES = (
@@ -614,7 +614,7 @@ def input_channels_for(representation: str, channel_format: str) -> int:
         return 6
     if channel_format == "cyclic_caf":
         return 3
-    if channel_format in ("mag", "scf"):
+    if channel_format == "scf":
         return 1
     return 2
 
