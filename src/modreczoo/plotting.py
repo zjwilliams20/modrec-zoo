@@ -468,7 +468,10 @@ def plot_input_examples(
             break
 
     present = [i for i in range(n_classes) if i in examples]
-    n_channels = next(iter(examples.values())).shape[0]
+    sample = next(iter(examples.values()))
+    if sample.ndim == 1:
+        return  # 1-D feature vectors have no meaningful channel plot
+    n_channels = sample.shape[0]
     ch_names = _CHANNEL_NAMES.get(channel_format, [f"ch{i}" for i in range(n_channels)])
     # Pad or trim if channel count drifts from the table.
     ch_names = list(ch_names[:n_channels]) + [f"ch{i}" for i in range(len(ch_names), n_channels)]

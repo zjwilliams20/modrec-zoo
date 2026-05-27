@@ -45,9 +45,9 @@ CHANNEL_FORMATS = (
 )
 MODEL_NAMES = (
     "time_cnn", "frequency_cnn", "spectrogram_cnn", "spectrogram_resnet",
-    "feature_mlp", "resnet_1d", "complex_cnn_1d", "dilated_cnn_1d",
+    "iq_features_mlp", "resnet_1d", "complex_cnn_1d", "dilated_cnn_1d",
     "patch_transformer_1d", "multiscale_pyramid_1d", "multi_stream_1d", "apf_net_1d",
-    "multilag_net_1d", "cyclic_caf_1d", "scf_resnet",
+    "multilag_net_1d", "cyclic_caf_1d", "scf_resnet", "csp_expert_mlp",
 )
 SNR_BIN_WIDTH = 4.0
 MLFLOW_DIR = Path("mlflow").absolute()
@@ -545,7 +545,8 @@ def train_one_model(
     from modreczoo.plotting import plot_input_examples
     input_examples_path = artifact_dir / "input_examples.png"
     plot_input_examples(train_loader, id_to_label, representation, channel_format, input_examples_path)
-    mlflow.log_artifact(str(input_examples_path), artifact_path="plots")
+    if input_examples_path.exists():
+        mlflow.log_artifact(str(input_examples_path), artifact_path="plots")
     del train_loader, val_loader
     gc.collect()
 
@@ -604,7 +605,7 @@ def effective_channel_format_for(model_name: str, requested_format: str) -> str:
 
 
 def input_channels_for(representation: str, channel_format: str) -> int:
-    if representation == "features":
+    if representation in ("iq_features", "csp_features"):
         return 1
     if channel_format == "apf":
         return 4

@@ -118,8 +118,10 @@ class ModrecDataset(Dataset):
                 noverlap=self.spectrogram_noverlap,
                 window=self.spectrogram_window,
             )
-        elif self.representation == "features":
-            features = handcrafted_features(x)
+        elif self.representation == "iq_features":
+            features = iq_features(x)
+        elif self.representation == "csp_features":
+            features = csp_expert_features(x)
         else:
             raise ValueError(f"Unsupported representation: {self.representation}")
 
@@ -440,6 +442,30 @@ def spectrogram_channels(
         mag = (mag - np.mean(mag)) / max(np.std(mag), np.finfo(np.float32).eps)
         phase = phase / np.pi
         return np.stack((mag, phase)).astype(np.float32)
+    if channel_format == "complex_powers":
+        # Apply power transforms in time domain, then compute per-channel mag spectrogram.
+        # x^M removes phase modulation at order M (e.g. x² → BPSK carrier at 2f_c).
+        eps = np.finfo(np.float32).eps
+        out = []
+        for power in (1, 2, 4):
+            xp = x ** power
+            _, _, zp = signal.spectrogram(
+                xp,
+                window=scipy_window,
+                nperseg=nperseg,
+                noverlap=noverlap,
+                nfft=freq_bins,
+                detrend=False,
+                return_onesided=False,
+                scaling="spectrum",
+                mode="complex",
+            )
+            zp = np.fft.fftshift(zp, axes=0)
+            for part in (np.real(zp), np.imag(zp)):
+                ch = resize_2d(part, freq_bins, time_bins).astype(np.float32)
+                scale = max(np.sqrt(np.mean(ch ** 2)), eps)
+                out.append(ch / scale)
+        return np.stack(out)
     if channel_format == "scf":
         return scf_channels(x, n_alpha=time_bins, n_freq=freq_bins, nperseg=nperseg)
     raise ValueError(f"Unsupported channel format: {channel_format}")
@@ -491,7 +517,87 @@ def scf_channels(
     return scf[np.newaxis]
 
 
-def handcrafted_features(x: np.ndarray) -> np.ndarray:
+N_CSP_EXPERT_FEATURES = 13
+
+
+def csp_expert_features(x: np.ndarray) -> np.ndarray:
+    """Expert CSP feature vector following Swami & Sadler (2000) / Dobre et al. (2007).
+
+    13 features: normalized higher-order cumulants, amplitude envelope stats,
+    CFO-invariant differential phase moments, and a conjugate spectral peak.
+    All features are invariant to carrier phase offset and unknown signal amplitude.
+
+    Citation:
+        Swami, A. & Sadler, B. M. "Hierarchical Digital Modulation Classification
+        Using Cumulants." IEEE Transactions on Communications, 2000.
+    """
+    # CFO removal is required for conjugate cumulants: E[x^k] rotates at k×δ
+    # cycles/sample and time-averaging with N=4096 causes severe attenuation otherwise.
+    x = remove_empirical_cfo(x - np.mean(x))
+    m21 = float(np.mean(np.abs(x) ** 2))
+    x = x / np.sqrt(max(m21, 1e-10))
+
+    # Moments (m21 == 1.0 after normalization above)
+    m20 = np.mean(x ** 2)
+    m40 = np.mean(x ** 4)
+    m41 = np.mean(x ** 3 * x.conj())
+    m42 = float(np.mean(np.abs(x) ** 4))
+    m63 = float(np.mean(np.abs(x) ** 6))
+    m84 = float(np.mean(np.abs(x) ** 8))
+
+    # Cumulants (subtract Gaussian cross-terms → zero for AWGN)
+    c20 = m20
+    c40 = m40 - 3 * m20 ** 2
+    c41 = m41 - 3 * m20  # m21 == 1
+    c42 = float((m42 - abs(m20) ** 2 - 2.0).real)  # m21 == 1
+
+    # Group 1: normalized cumulants (AWGN-immune, phase-invariant via |·|)
+    f1 = float(abs(c20))        # BPSK ≈ 1, all others ≈ 0
+    f2 = float(abs(c40))        # BPSK 2.0, QPSK 1.0, 8PSK ≈ 0, QAM 0.6-0.7
+    f3 = c42                    # PSK: negative (near -2 ideal), QAM: more negative
+    f4 = float(abs(c41))        # near-0 for symmetric constellations
+
+    # Group 2: amplitude envelope (constant-envelope PSK/MSK vs. variable QAM)
+    amp = np.abs(x)
+    f5 = m42                                        # amplitude kurtosis numerator
+    f6 = float(amp.std() / (amp.mean() + 1e-10))   # variation coeff (MSK/PSK ≈ 0)
+    f7 = m63                                        # 6th moment: monotone in QAM order
+    f8 = m84                                        # 8th moment: separates 64/256-QAM
+
+    # Group 3: differential phase moments (CFO-invariant)
+    raw_d = x[1:] * x[:-1].conj()
+    d = raw_d / (np.abs(raw_d) + 1e-10)            # unit-normalized phase increment
+    f9  = float(abs(np.mean(d ** 2)))              # 2-fold: BPSK ≈ 1
+    f10 = float(abs(np.mean(d ** 4)))              # 4-fold: QPSK ≈ 1, pi/4-DQPSK < 1
+    f11 = float(abs(np.mean(d ** 8)))              # 8-fold: 8PSK & pi/4-DQPSK high
+
+    # Group 4: instantaneous frequency regularity (MSK: near-constant IF → f12 ≈ 0)
+    dphi = np.diff(np.unwrap(np.angle(x)))
+    f12 = float(dphi.std() / (np.abs(dphi).mean() + 1e-10))
+
+    # Group 5: conjugate spectral peak-to-mean ratio (BPSK has sharp line at 2f_c)
+    x2_spec = np.abs(np.fft.fft(x ** 2))
+    half = x2_spec[1 : len(x2_spec) // 2]
+    f13 = float(half.max() / (half.mean() + 1e-10))
+
+    feats = np.array([f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13], dtype=np.float32)
+    return np.nan_to_num(feats)
+
+
+def iq_features(x: np.ndarray) -> np.ndarray:
+    """Compact feature baseline loosely inspired by Azzouz & Nandi (1995).
+
+    The reference uses decision-tree rules over a larger set of instantaneous
+    amplitude, phase, and frequency statistics for AMC. This implementation is
+    not a reproduction: it keeps only simple amplitude moments, I/Q spread,
+    instantaneous-frequency moments, and coarse spectral centroid/spread for a
+    lightweight learned baseline.
+
+    Citation:
+        Azzouz, E. E. & Nandi, A. K. "Automatic identification of digital
+        modulation types." Signal Processing, 47(1), 55-69, 1995.
+        https://doi.org/10.1016/0165-1684(95)00099-2
+    """
     amp = np.abs(x)
     phase = np.unwrap(np.angle(x))
     inst_freq = np.diff(phase, prepend=phase[0])

@@ -10,6 +10,7 @@ from .dilated import DilatedCNN1D
 
 # Models that require a specific external channel format regardless of --channel-format.
 MODEL_REQUIRED_CHANNEL_FORMATS: dict[str, str] = {
+    "complex_cnn_1d": "real_imag",
     "apf_net_1d": "apf",
     "multilag_net_1d": "multilag",
     "cyclic_caf_1d": "cyclic_caf",
@@ -21,7 +22,8 @@ MODEL_REPRESENTATIONS = {
     "frequency_cnn": "frequency",
     "spectrogram_cnn": "spectrogram",
     "spectrogram_resnet": "spectrogram",
-    "feature_mlp": "features",
+    "iq_features_mlp": "iq_features",
+    "csp_expert_mlp": "csp_features",
     "resnet_1d": "time",
     "complex_cnn_1d": "time",
     "dilated_cnn_1d": "time",
@@ -83,8 +85,11 @@ def make_model(
             ),
             representation_for_model(model_name),
         )
-    if model_name == "feature_mlp":
+    if model_name == "iq_features_mlp":
         return FeatureMLP(n_classes, 10), representation_for_model(model_name)
+    if model_name == "csp_expert_mlp":
+        from modreczoo.data import N_CSP_EXPERT_FEATURES
+        return FeatureMLP(n_classes, N_CSP_EXPERT_FEATURES), representation_for_model(model_name)
     if model_name == "resnet_1d":
         return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
     if model_name == "complex_cnn_1d":
