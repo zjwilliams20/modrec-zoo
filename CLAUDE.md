@@ -34,16 +34,20 @@ bash scripts/csp-sweep.sh
 src/modreczoo/
   simulation.py   — synthetic I/Q generation; writes signals.npy + extras.npz + metadata.parquet
   data.py         — ModrecDataset, load_dataset(), channel format transforms in __getitem__
-  training.py     — train/val/test loop, MLflow logging, CHANNEL_FORMATS, MODEL_NAMES, input_channels_for()
+  training.py     — train/val/test loop, MLflow logging, CHANNEL_FORMATS, input_channels_for()
   evaluation.py   — per-class metrics, accuracy-by-SNR, calibration, bootstrap CI
   reporting.py    — HTML performance explorer, prediction/error tables
   plotting.py     — confusion matrix, SNR curves, calibration diagrams
   models/
-    registry.py   — make_model() factory, MODEL_REPRESENTATIONS, MODEL_REQUIRED_CHANNEL_FORMATS
-    baselines.py  — TimeCNN, ResNet1D, SpectrogramCNN, SpectrogramResNet, FeatureMLP
+    registry.py   — model catalog, make_model() factory, representations, required channel formats
+    cnn.py        — CNN1D, CNN2D
+    resnet.py     — ResNet1D, ResNet2D and residual blocks
+    mlp.py        — FeatureMLP
     complex.py    — ComplexCNN1D
     dilated.py    — DilatedCNN1D
-    advanced.py   — PatchTransformer1D, MultiScalePyramidNet, APFNet, MultiLagNet, CyclicCAFNet
+    transformer.py — PatchTransformer1D
+    multiscale.py — MultiScalePyramidNet
+    streams.py    — APFNet, MultiStreamNet
   cli/
     simulate.py   — modreczoo-simulate
     train.py      — modreczoo-train (accepts --config YAML via jsonargparse)

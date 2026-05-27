@@ -32,7 +32,7 @@ from modreczoo.evaluation import (
     union_bound_accuracy_by_snr,
     write_summary,
 )
-from modreczoo.models import make_model, representation_for_model, required_channel_format_for
+from modreczoo.models import MODEL_NAMES, make_model, representation_for_model, required_channel_format_for
 from modreczoo.oracle import load_oracle_cache, oracle_cache_status
 from modreczoo.reporting import build_prediction_table, error_slice_table, write_performance_explorer
 
@@ -42,12 +42,6 @@ CFO_SWEEP_MODES = ("raw", *CFO_ESTIMATORS)
 CHANNEL_FORMATS = (
     "real_imag", "mag_phase", "differential_complex",
     "apf", "complex_powers", "multilag", "cyclic_caf", "scf",
-)
-MODEL_NAMES = (
-    "time_cnn", "frequency_cnn", "spectrogram_cnn", "spectrogram_resnet",
-    "iq_features_mlp", "resnet_1d", "complex_cnn_1d", "dilated_cnn_1d",
-    "patch_transformer_1d", "multiscale_pyramid_1d", "multi_stream_1d", "apf_net_1d",
-    "multilag_net_1d", "cyclic_caf_1d", "scf_resnet", "csp_expert_mlp",
 )
 SNR_BIN_WIDTH = 4.0
 MLFLOW_DIR = Path("mlflow").absolute()

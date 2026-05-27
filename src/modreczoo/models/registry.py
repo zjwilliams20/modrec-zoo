@@ -1,39 +1,160 @@
-from typing import Sequence, Tuple
+from dataclasses import dataclass
+from collections.abc import Callable
 
 import torch.nn as nn
 
-from .advanced import APFNet, MultiScalePyramidNet, MultiStreamNet, PatchTransformer1D
-from .baselines import CNN1D, CNN2D, FeatureMLP, ResNet1D, ResNet2D
 from .complex import ComplexCNN1D
+from .cnn import CNN1D, CNN2D
 from .dilated import DilatedCNN1D
+from .mlp import FeatureMLP
+from .multiscale import MultiScalePyramidNet
+from .resnet import ResNet1D, ResNet2D
+from .streams import APFNet, MultiStreamNet
+from .transformer import PatchTransformer1D
 
 
-# Models that require a specific external channel format regardless of --channel-format.
-MODEL_REQUIRED_CHANNEL_FORMATS: dict[str, str] = {
-    "complex_cnn_1d": "real_imag",
-    "apf_net_1d": "apf",
-    "multilag_net_1d": "multilag",
-    "cyclic_caf_1d": "cyclic_caf",
-    "scf_resnet": "scf",
+@dataclass(frozen=True)
+class ModelSpec:
+    representation: str
+    builder: Callable[..., nn.Module]
+    required_channel_format: str | None = None
+
+
+def _feature_mlp(n_classes: int, **_: object) -> nn.Module:
+    return FeatureMLP(n_classes, 10)
+
+
+def _cnn1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
+    return CNN1D(n_classes, in_channels=in_channels)
+
+
+def _resnet1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
+    return ResNet1D(n_classes, in_channels=in_channels)
+
+
+def _complex_cnn1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
+    return ComplexCNN1D(n_classes, in_channels=in_channels)
+
+
+def _dilated_cnn1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
+    return DilatedCNN1D(n_classes, in_channels=in_channels)
+
+
+def _multiscale_pyramid_1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
+    return MultiScalePyramidNet(n_classes, in_channels=in_channels)
+
+
+def _multi_stream_1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
+    return MultiStreamNet(n_classes, in_channels=in_channels)
+
+
+def _apf_net_1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
+    return APFNet(n_classes, in_channels=in_channels)
+
+
+def _csp_expert_mlp(n_classes: int, **_: object) -> nn.Module:
+    from modreczoo.data import N_CSP_EXPERT_FEATURES
+    return FeatureMLP(n_classes, N_CSP_EXPERT_FEATURES)
+
+
+def _spectrogram_cnn(
+    n_classes: int,
+    in_channels: int,
+    spectrogram_base_channels: int,
+    **_: object,
+) -> nn.Module:
+    return CNN2D(
+        n_classes,
+        in_channels=in_channels,
+        base_channels=spectrogram_base_channels,
+    )
+
+
+def _spectrogram_resnet(
+    n_classes: int,
+    in_channels: int,
+    spectrogram_base_channels: int,
+    spectrogram_freq_kernel: int,
+    spectrogram_time_kernel: int,
+    **_: object,
+) -> nn.Module:
+    return ResNet2D(
+        n_classes,
+        in_channels=in_channels,
+        base_channels=spectrogram_base_channels,
+        freq_kernel=spectrogram_freq_kernel,
+        time_kernel=spectrogram_time_kernel,
+    )
+
+
+def _patch_transformer_1d(
+    n_classes: int,
+    in_channels: int,
+    n_samples: int,
+    transformer_patch_size: int,
+    transformer_d_model: int,
+    transformer_n_heads: int,
+    transformer_n_layers: int,
+    **_: object,
+) -> nn.Module:
+    return PatchTransformer1D(
+        n_classes,
+        in_channels=in_channels,
+        n_samples=n_samples,
+        patch_size=transformer_patch_size,
+        d_model=transformer_d_model,
+        n_heads=transformer_n_heads,
+        n_layers=transformer_n_layers,
+    )
+
+
+MODEL_SPECS: dict[str, ModelSpec] = {
+    "time_cnn": ModelSpec("time", _cnn1d),
+    "frequency_cnn": ModelSpec("frequency", _cnn1d),
+    "spectrogram_cnn": ModelSpec("spectrogram", _spectrogram_cnn),
+    "spectrogram_resnet": ModelSpec("spectrogram", _spectrogram_resnet),
+    "iq_features_mlp": ModelSpec("iq_features", _feature_mlp),
+    "resnet_1d": ModelSpec("time", _resnet1d),
+    "complex_cnn_1d": ModelSpec(
+        "time",
+        _complex_cnn1d,
+        required_channel_format="real_imag",
+    ),
+    "dilated_cnn_1d": ModelSpec("time", _dilated_cnn1d),
+    "patch_transformer_1d": ModelSpec("time", _patch_transformer_1d),
+    "multiscale_pyramid_1d": ModelSpec("time", _multiscale_pyramid_1d),
+    "multi_stream_1d": ModelSpec("time", _multi_stream_1d),
+    "apf_net_1d": ModelSpec(
+        "time",
+        _apf_net_1d,
+        required_channel_format="apf",
+    ),
+    "multilag_net_1d": ModelSpec(
+        "time",
+        _resnet1d,
+        required_channel_format="multilag",
+    ),
+    "cyclic_caf_1d": ModelSpec(
+        "time",
+        _resnet1d,
+        required_channel_format="cyclic_caf",
+    ),
+    "scf_resnet": ModelSpec(
+        "spectrogram",
+        _spectrogram_resnet,
+        required_channel_format="scf",
+    ),
+    "csp_expert_mlp": ModelSpec("csp_features", _csp_expert_mlp),
 }
 
+MODEL_NAMES = tuple(MODEL_SPECS)
 MODEL_REPRESENTATIONS = {
-    "time_cnn": "time",
-    "frequency_cnn": "frequency",
-    "spectrogram_cnn": "spectrogram",
-    "spectrogram_resnet": "spectrogram",
-    "iq_features_mlp": "iq_features",
-    "csp_expert_mlp": "csp_features",
-    "resnet_1d": "time",
-    "complex_cnn_1d": "time",
-    "dilated_cnn_1d": "time",
-    "patch_transformer_1d": "time",
-    "multiscale_pyramid_1d": "time",
-    "apf_net_1d": "time",
-    "multi_stream_1d": "time",
-    "multilag_net_1d": "time",
-    "cyclic_caf_1d": "time",
-    "scf_resnet": "spectrogram",
+    model_name: spec.representation for model_name, spec in MODEL_SPECS.items()
+}
+MODEL_REQUIRED_CHANNEL_FORMATS: dict[str, str] = {
+    model_name: channel_format
+    for model_name, spec in MODEL_SPECS.items()
+    if (channel_format := spec.required_channel_format) is not None
 }
 
 
@@ -60,74 +181,22 @@ def make_model(
     transformer_d_model: int = 128,
     transformer_n_heads: int = 4,
     transformer_n_layers: int = 4,
-) -> Tuple[nn.Module, str]:
-    if model_name == "time_cnn":
-        return CNN1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "frequency_cnn":
-        return CNN1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "spectrogram_cnn":
-        return (
-            CNN2D(
-                n_classes,
-                in_channels=in_channels,
-                base_channels=spectrogram_base_channels,
-            ),
-            representation_for_model(model_name),
-        )
-    if model_name == "spectrogram_resnet":
-        return (
-            ResNet2D(
-                n_classes,
-                in_channels=in_channels,
-                base_channels=spectrogram_base_channels,
-                freq_kernel=spectrogram_freq_kernel,
-                time_kernel=spectrogram_time_kernel,
-            ),
-            representation_for_model(model_name),
-        )
-    if model_name == "iq_features_mlp":
-        return FeatureMLP(n_classes, 10), representation_for_model(model_name)
-    if model_name == "csp_expert_mlp":
-        from modreczoo.data import N_CSP_EXPERT_FEATURES
-        return FeatureMLP(n_classes, N_CSP_EXPERT_FEATURES), representation_for_model(model_name)
-    if model_name == "resnet_1d":
-        return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "complex_cnn_1d":
-        return ComplexCNN1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "dilated_cnn_1d":
-        return DilatedCNN1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "patch_transformer_1d":
-        return (
-            PatchTransformer1D(
-                n_classes,
-                in_channels=in_channels,
-                n_samples=n_samples,
-                patch_size=transformer_patch_size,
-                d_model=transformer_d_model,
-                n_heads=transformer_n_heads,
-                n_layers=transformer_n_layers,
-            ),
-            representation_for_model(model_name),
-        )
-    if model_name == "multiscale_pyramid_1d":
-        return MultiScalePyramidNet(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "apf_net_1d":
-        return APFNet(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "multi_stream_1d":
-        return MultiStreamNet(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "multilag_net_1d":
-        return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "cyclic_caf_1d":
-        return ResNet1D(n_classes, in_channels=in_channels), representation_for_model(model_name)
-    if model_name == "scf_resnet":
-        return (
-            ResNet2D(
-                n_classes,
-                in_channels=in_channels,
-                base_channels=spectrogram_base_channels,
-                freq_kernel=spectrogram_freq_kernel,
-                time_kernel=spectrogram_time_kernel,
-            ),
-            representation_for_model(model_name),
-        )
-    raise ValueError(f"Unsupported model: {model_name}")
+) -> tuple[nn.Module, str]:
+    try:
+        spec = MODEL_SPECS[model_name]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported model: {model_name}") from exc
+
+    model = spec.builder(
+        n_classes=n_classes,
+        n_samples=n_samples,
+        in_channels=in_channels,
+        spectrogram_base_channels=spectrogram_base_channels,
+        spectrogram_freq_kernel=spectrogram_freq_kernel,
+        spectrogram_time_kernel=spectrogram_time_kernel,
+        transformer_patch_size=transformer_patch_size,
+        transformer_d_model=transformer_d_model,
+        transformer_n_heads=transformer_n_heads,
+        transformer_n_layers=transformer_n_layers,
+    )
+    return model, spec.representation

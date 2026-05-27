@@ -184,7 +184,7 @@ Three-layer plain 1D CNN. `frequency_cnn` is the same architecture applied to th
 magnitude spectrum instead of raw I/Q (handled in the data loader, not the model).
 No residual connections; fast to train, reasonable ceiling.
 
-- **File:** `models/baselines.py` · `CNN1D`
+- **File:** `models/cnn.py` · `CNN1D`
 - **Formats:** any 1-D format
 - **Params:** ~170 K
 
@@ -195,7 +195,7 @@ No residual connections; fast to train, reasonable ceiling.
 Three-layer 2D CNN on STFT spectrograms. Isotropic 3×3 kernels. Simple enough to
 overfit on small datasets; useful as a spectrogram baseline.
 
-- **File:** `models/baselines.py` · `CNN2D`
+- **File:** `models/cnn.py` · `CNN2D`
 - **Formats:** any 2-D spectrogram format
 - **Key args:** `--spectrogram-base-channels` (default 24)
 
@@ -207,7 +207,7 @@ Full 4-stage 2D ResNet on STFT spectrograms with **anisotropic** kernels
 (`freq_kernel × time_kernel`). The asymmetry matters: frequency structure
 (narrowband vs. wideband) has different scale than temporal structure (symbol patterns).
 
-- **File:** `models/baselines.py` · `ResNet2D`
+- **File:** `models/resnet.py` · `ResNet2D`
 - **Formats:** any 2-D spectrogram format
 - **Key args:** `--spectrogram-freq-kernel` (default 5), `--spectrogram-time-kernel` (default 3), `--spectrogram-base-channels`
 
@@ -218,7 +218,7 @@ Full 4-stage 2D ResNet on STFT spectrograms with **anisotropic** kernels
 Shallow MLP over 10 hand-computed features. Included as a lower bound; not competitive
 with any learned representation.
 
-- **File:** `models/baselines.py` · `FeatureMLP`
+- **File:** `models/mlp.py` · `FeatureMLP`
 - **Formats:** `features`
 
 ---
@@ -233,7 +233,7 @@ time steps to a single feature vector.
 This is the go-to backbone for 1D signals in this zoo. Pairs exceptionally well with
 `differential_complex`.
 
-- **File:** `models/baselines.py` · `ResNet1D`
+- **File:** `models/resnet.py` · `ResNet1D`
 - **Formats:** any 1-D format
 - **Params:** ~340 K
 
@@ -283,7 +283,7 @@ Currently the weakest architecture in the zoo. The fixed positional encoding is
 misaligned with variable OSR (symbol boundaries fall at different positions per sample),
 which is the structural advantage CNNs have via translation equivariance.
 
-- **File:** `models/advanced.py` · `PatchTransformer1D`
+- **File:** `models/transformer.py` · `PatchTransformer1D`
 - **Formats:** any 1-D format
 - **Key args:** `--transformer-patch-size`, `--transformer-d-model`, `--transformer-n-heads`, `--transformer-n-layers`
 - **Params:** ~660 K
@@ -302,7 +302,7 @@ approximately 1 sample per symbol — the highest information density for that O
 The explicit multi-scale construction is more direct than DilatedCNN's receptive field
 trick, but currently shows slightly more val→test overfit.
 
-- **File:** `models/advanced.py` · `MultiScalePyramidNet`
+- **File:** `models/multiscale.py` · `MultiScalePyramidNet`
 - **Formats:** any 1-D format
 - **Params:** ~440 K
 
@@ -325,7 +325,7 @@ network to discover the decomposition from raw I/Q.
 cos/sin encoding of phase (`cos∠x`, `sin∠x`) is used rather than the raw phase angle
 to avoid the ±π discontinuity at the branch cut.
 
-- **File:** `models/advanced.py` · `APFNet`
+- **File:** `models/streams.py` · `APFNet`
 - **Formats:** `apf` (forced — 4-channel input required)
 - **Params:** ~380 K
 
@@ -343,7 +343,7 @@ constraint. Classification reads from the mean-pooled output.
 Unlike APFNet, no physics-motivated channel decomposition is assumed — the model
 discovers inter-channel interactions purely from data. Works with any channel format.
 
-- **File:** `models/advanced.py` · `MultiStreamNet`
+- **File:** `models/streams.py` · `MultiStreamNet`
 - **Formats:** any 1-D format
 - **Params:** varies with `in_channels`
 
@@ -357,7 +357,7 @@ real and imaginary parts, giving 6 channels total (each lag RMS-normalised). Thi
 extends the differential-complex idea to multiple time scales simultaneously,
 capturing CSP-like structure without an explicit spectral analysis.
 
-- **File:** `models/baselines.py` · `ResNet1D` (reused)
+- **File:** `models/resnet.py` · `ResNet1D` (reused)
 - **Formats:** `multilag` (forced — 6-channel input)
 
 ---
@@ -369,7 +369,7 @@ each of three lags τ ∈ {1, 4, 16}, computes `|FFT(z[n]·z*[n-τ])|` and
 max-normalises it, yielding 3 channels of length 2048. The resulting spectra are
 cyclostationary features sensitive to the modulation's characteristic symbol rate.
 
-- **File:** `models/baselines.py` · `ResNet1D` (reused)
+- **File:** `models/resnet.py` · `ResNet1D` (reused)
 - **Formats:** `cyclic_caf` (forced — 3-channel input)
 
 ---
@@ -382,5 +382,5 @@ density between the signal and a frequency-shifted copy of itself. The result is
 a single-channel 2D representation that highlights the cyclostationary structure
 unique to each modulation class.
 
-- **File:** `models/baselines.py` · `ResNet2D` (reused)
+- **File:** `models/resnet.py` · `ResNet2D` (reused)
 - **Formats:** `scf` (forced — 1-channel 2D input)

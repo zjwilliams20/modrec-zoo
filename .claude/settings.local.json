@@ -11,5 +11,6 @@
       "Bash(python3 *)",
       "Bash(DRY_RUN=1 bash *)"
     ]
-  }
+  },
+  "outputStyle": "Explanatory"
 }
