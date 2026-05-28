@@ -1,6 +1,6 @@
 # CSP Expert Feature Lessons & Deep-Learning Roadmap
 
-*Last updated: 2026-05-27 — written after v16/v18/v19 CSP expert feature iterations*
+*Last updated: 2026-05-28 — 6-model ensemble=81.92% (new best); JointV4-APF running*
 
 ---
 
@@ -101,16 +101,57 @@ Accuracy history on the baseline_4096 dataset (200k signals, 8 classes):
   csp_expert_mlp (v15)       70      0.6844     multi-scale profile Groups 8-9
   csp_expert_mlp (v16)       74      0.7096     Group 8 FFT autocorrelation
   csp_expert_mlp (v18)       77      0.7207*    signed re4_min, re4_asym, pc4_min
-  csp_expert_mlp (v19)      107      TBD        re4_at_peak + full 29-pt profile
+  csp_expert_mlp (v19)      107      0.7262*    re4_at_peak + full 29-pt profile
+  HybridCSPNet (v19)         107      0.7288*    1D-conv branch on re4 profile
 
-  Deep-learning baseline              ~0.75      (target reference)
+  JointCSPCNN v1 ens.      107+raw   0.8092*    CSP MLP + mini-ResNet1D (base=16, 480k)
+  JointCSPCNN v2 ens.      107+raw   0.8125*    base_ch=32 signal branch (900k)
+  JointCSPCNN v3 ens.      107+raw   0.8106*    ZOO ResNet1D (base=32, 2b/stage, 1.29M)
+  4-model cross-ens.       107+raw   0.8165     v1×2 + v2×2 arch+seed diversity
+  JointCSPCNN v2b ens.     107+raw   0.8130*    base_ch=32, LR=2e-3 (complementary to v2)
+  LR-diversity 4-model     107+raw   0.8170     v2×2 + v2b×2 (same arch, 2 LRs)
+  6-model ensemble         107+raw   0.8192     v1×2+v2×2+v2b×2  ← CURRENT BEST
+  JointV4-APF (running)    107+raw   TBD        APF signal branch (4ch: log-mag,ph,IF)
 
-  *ensemble of ResMLP-base + ResMLP-featdrop
+  DL baseline (APF/ResNet1D)          0.76       (target: 76% — exceeded by +5.92pp)
+  Theoretical ceiling                ~0.85       (64/256-QAM + low-SNR floor)
+
+  *ensemble of 2 random seeds
 ```
 
-The gap between our best (~72%) and the DL target (~75%) is dominated by:
-  - PSK triangle (4PSK/8PSK/π4-DQPSK): ~1900 errors, ~23% of all errors
-  - QAM triangle (16/64/256): ~4500 errors, ~54% — mostly fundamental limit
+**Key results (2026-05-28):**
+- JointCSPCNN v1 ensemble: **80.92%** — +4.92pp above DL baseline, +8.04pp above CSP-only
+- JointCSPCNN v2 ensemble: **81.25%** — +0.33pp improvement, 256QAM partially fixed
+- 6-model ensemble: **81.92%** — new best, +5.92pp above DL baseline
+
+The expert CSP features contribute ~4% on top of the standalone DL model; the signal CNN
+contributes ~8% on top of the standalone CSP model. Together they reach 81%+ without any
+attention mechanisms or transformers — pure two-branch fusion.
+
+V2 per-class delta vs v1 (ensemble):
+  - 256QAM: +5.9% (larger signal branch learns amplitude envelope better)
+  - PSK triangle: 827 → 979 errors (+152, worse — LR=1e-3 limits phase discrimination)
+  - Net: +33 basis points via better QAM discrimination despite PSK regression
+
+V3 (0.8106): class-weighted loss hurt cross-class calibration; 256QAM didn't improve vs v2.
+MC Dropout: zero benefit at p=0.20–0.25 (too light for implicit ensemble gain).
+
+4-model cross-ensemble (0.8165): architecture diversity (base=16 vs base=32) is the strongest
+lever found so far. Even weaker individual models combine to beat any 2-model same-arch ensemble.
+256QAM recall hit 61.0% — the ensemble finds a better 64/256-QAM decision boundary.
+
+V2b (0.8130): confirmed LR=1e-3 bottleneck. LR=2e-3 gives complementary per-class profile:
+256QAM: 60.6% (vs v2's 55.5%), 16QAM: 75.0% (vs v2's 81.6%). Creates LR-diversity ensemble.
+
+LR-diversity 4-model (0.8170): combining v2+v2b LR variants slightly exceeds arch-diversity.
+
+6-model ensemble (0.8192): all three diversity axes (arch, LR, seed) combined. Per-class:
+  16QAM=84.6%, 256QAM=60.0%, 4PSK=94.2%, 64QAM=41.0%, 8PSK=86.9%, π/4=88.7%
+  Diminishing returns: only +0.22pp over best 4-model. The 256QAM/64QAM ceiling (~61%/41%)
+  persists across all ensemble compositions — confirming the SRRC information-theoretic limit.
+
+JointV4-APF (running): APF signal branch [log-mag, cos(ph), sin(ph), instantaneous_freq].
+  If per-class profile differs from complex_powers, can create new diversity source for 8-model ens.
 
 ---
 
@@ -315,18 +356,23 @@ AMC literature (Swami & Sadler 2000).
 
 ## 4. Actionable Priorities
 
-Short-term (next feature iteration, v20):
+**Immediate** (JointCSPCNN variants, being run now):
+- v2: base_ch=32, 60 epochs — more signal branch capacity
+- v3: ZOO ResNet1D backbone (base=32, 2 blocks/stage) — max signal capacity
+- Cross-ensemble: v1-s0 + v1-s42 + v2-s0 + v2-s42 (4-model ensemble)
+
+**Short-term** (CSP feature improvements, v20):
 - Remove useless conjugate moments |E[x^6]|, |E[x^8]| from Group 9
 - Add trimmed M84 (more robust at low SNR for 16/64-QAM separation)
-- Add fine-grained CDF thresholds in 0.40–0.50 range for 16QAM inner-ring density
+- Add `re4_late = mean(re4_real[18:29])` (explicit sustained-plateau indicator for 4PSK)
 
-Medium-term (new DL channel format):
+**Medium-term** (new DL channel format):
 - Implement `signed_cyclic_profile` channel format: (B, 4, 29) tensor from
   CyclicProfileLayer above, used with a Transformer backbone
 - Try this with `patch_transformer_1d` backbone treating lag-dimension as "tokens"
 
-Longer-term (architecture):
-- SNR-adaptive training: oversample low-SNR signals or add SNR regression head
+**Longer-term** (architecture):
+- SNR-adaptive training: curriculum from easy (high-SNR) to hard (low-SNR)
 - Relative positional encodings in `patch_transformer_1d`
 - PhaseStreamNet built on APFNet's stream encoder pattern
 
@@ -334,16 +380,21 @@ Longer-term (architecture):
 
 ## 5. What Deep Learning Can and Cannot Improve
 
-| Error source            | Current acc | Theoretical limit | DL can help? |
-|-------------------------|-------------|-------------------|--------------|
-| 64QAM ↔ 256QAM          | 42-49% each | ~50% each*        | No           |
-| 16QAM ↔ 64QAM (low SNR) | ~88%        | ~95%+             | Marginally   |
-| 4PSK ↔ π/4-DQPSK        | 76-73%      | ~90%+             | Yes          |
-| 8PSK ↔ 4PSK/π4          | ~70%        | ~90%+             | Yes          |
-| 2PSK, MSK               | 94-97%      | 98%+              | Marginally   |
+Two benchmarks: `CSP-only` (v19 HybridCSPNet ensemble) and `JointCSPCNN v1` (seed 0):
+
+| Error source            | CSP-only acc | JointCSPCNN v1 | Theoretical | DL can help? |
+|-------------------------|-------------|-----------------|-------------|--------------|
+| 64QAM ↔ 256QAM          | 56% / 38%   | TBD (pending)   | ~50% each*  | Partially    |
+| 16QAM ↔ 64QAM (low SNR) | ~71%        | TBD             | ~95%+       | Yes          |
+| 4PSK ↔ π/4-DQPSK        | 74% / 82%   | TBD             | ~90%+       | Yes          |
+| 8PSK ↔ 4PSK/π4          | ~73%        | TBD             | ~90%+       | Yes          |
+| 2PSK, MSK               | 93-96%      | TBD             | 98%+        | Marginally   |
+
+*(JointCSPCNN per-class breakdown pending seed-42 completion; expected large PSK improvement)
 
 *Without symbol timing, 64/256-QAM are fundamentally indistinguishable given
-SRRC filtering.  A DL model on raw I/Q faces the same information limit.
+SRRC filtering.  However, at 4096 samples the amplitude histogram provides additional
+separation — the JointCSPCNN signal branch appears to exploit this more than predicted.
 
 The deep learning advantage over hand-crafted CSP features is:
 1. **Learning the summary statistics** — instead of min/max of the re4 profile,
@@ -356,3 +407,49 @@ The deep learning advantage over hand-crafted CSP features is:
 
 The expert features set the floor; the DL target ceiling is limited by the
 information-theoretic bounds identified above.
+
+---
+
+## 6. What JointCSPCNN Taught Us (2026-05-28)
+
+After the CSP feature engineering hit a ceiling at ~73%, combining expert features with
+a raw-signal mini-ResNet yielded 80.33% — well above the 76% DL baseline. Key lessons:
+
+### 6.1 Expert Features + Raw Signal > Either Alone
+
+```
+  CSP expert features only:       72.88%   (fundamental SRRC dilution limit)
+  DL signal CNN only (ZOO):       76.00%   (baseline on baseline_4096)
+  Joint (CSP + signal mini-CNN):  80.33%   (+7.4% over CSP, +4.3% over DL-only)
+```
+
+The two branches capture genuinely complementary information:
+- **CSP branch**: Re(E[d^4]) profile discriminates PSK types even at high SNR via closed-form theory
+- **Signal branch**: Raw amplitude at 4096 samples × temporal pattern captures QAM order and low-SNR patterns
+
+### 6.2 The Signal CNN Does What SRRC Prevents Expert Features From Doing
+
+Expert features computed on SRRC-filtered signals lose inter-symbol amplitude information.
+The CNN operating on raw IQ can still extract the amplitude histogram shape that distinguishes
+64-QAM from 256-QAM — not perfectly, but enough to reduce errors substantially.
+
+This is a key lesson: **hand-crafted features applied to SRRC signals face a mathematical ceiling
+that the same raw data does not have.** The signal CNN can learn SRRC-aware representations.
+
+### 6.3 OneCycleLR Peak Tells You a Lot
+
+Val accuracy peaked at epoch 20/80 (80.33%) and plateaued at ~79% for the remaining 60 epochs.
+This means:
+- The correct learning rate hits a good basin quickly in phase 1
+- phase 2 (LR decay) can't improve beyond the epoch-20 basin
+- **Action**: use fewer epochs or cosine-annealing with restarts (SGDR) to escape this basin
+
+### 6.4 What Expert Features Still Add Over DL-Only
+
+Even though the signal CNN alone gets 76%, adding 107 CSP features pushes to 80.33%:
+- The re4 profile directly encodes the PSK-class decision in a noise-robust way
+- The amplitude moments (Group 2) help at high SNR where constellation shape is clear
+- The combined model has access to both the theory-derived statistics AND the raw signal
+
+This supports using expert features as **additional input channels** in future architectures
+rather than replacing DL with hand-crafted features or vice versa.
