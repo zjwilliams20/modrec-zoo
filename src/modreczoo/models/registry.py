@@ -53,12 +53,14 @@ def _apf_net_1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
 
 
 def _csp_canonical_mlp(n_classes: int, **_: object) -> nn.Module:
-    from modreczoo.data import N_CSP_CANONICAL_FEATURES
+    from modreczoo.features import N_CSP_CANONICAL_FEATURES
+
     return FeatureMLP(n_classes, N_CSP_CANONICAL_FEATURES)
 
 
 def _csp_expert_mlp(n_classes: int, **_: object) -> nn.Module:
-    from modreczoo.data import N_CSP_EXPERT_FEATURES
+    from modreczoo.features import N_CSP_EXPERT_FEATURES
+
     return FeatureMLP(n_classes, N_CSP_EXPERT_FEATURES)
 
 

@@ -379,7 +379,7 @@ def plot_example_spectrograms(
     time_bins: int = 64,
     window: str = "kaiser:15",
 ) -> None:
-    from modreczoo.data import normalize_signal, spectrogram_channels
+    from modreczoo.transforms import normalize_signal, spectrogram_channels
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -886,7 +886,7 @@ def iq_explorer_figure(
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    from modreczoo.data import normalize_signal
+    from modreczoo.transforms import normalize_signal
 
     x = normalize_signal(np.asarray(signals[int(row_idx)]))
     n = len(x)
