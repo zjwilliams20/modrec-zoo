@@ -18,6 +18,7 @@ dependencies = [
     "torch",
     "mlflow",
     "scikit-learn",
+    "umap-learn",
     "psutil>=7.2.2",
     "nvidia-ml-py>=13.595.45",
     "jsonargparse",
@@ -28,6 +29,7 @@ dependencies = [
 modreczoo-simulate = "modreczoo.cli.simulate:main"
 modreczoo-train = "modreczoo.cli.train:main"
 modreczoo-plot-spectrograms = "modreczoo.cli.plot_spectrograms:main"
+modreczoo-domain-shift = "modreczoo.cli.domain_shift:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/modreczoo"]
