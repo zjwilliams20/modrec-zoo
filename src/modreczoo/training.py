@@ -599,7 +599,7 @@ def effective_channel_format_for(model_name: str, requested_format: str) -> str:
 
 
 def input_channels_for(representation: str, channel_format: str) -> int:
-    if representation in ("iq_features", "csp_features"):
+    if representation in ("iq_features", "csp_features", "csp_canonical"):
         return 1
     if channel_format == "apf":
         return 4

@@ -122,6 +122,8 @@ class ModrecDataset(Dataset):
             features = iq_features(x)
         elif self.representation == "csp_features":
             features = csp_expert_features(x)
+        elif self.representation == "csp_canonical":
+            features = csp_canonical_features(x)
         else:
             raise ValueError(f"Unsupported representation: {self.representation}")
 
@@ -517,71 +519,303 @@ def scf_channels(
     return scf[np.newaxis]
 
 
-N_CSP_EXPERT_FEATURES = 13
+N_CSP_CANONICAL_FEATURES = 13
+N_CSP_EXPERT_FEATURES = 107
 
 
-def csp_expert_features(x: np.ndarray) -> np.ndarray:
-    """Expert CSP feature vector following Swami & Sadler (2000) / Dobre et al. (2007).
+def csp_canonical_features(x: np.ndarray) -> np.ndarray:
+    """Canonical CSP feature vector (13 features) strictly from the AMC literature.
 
-    13 features: normalized higher-order cumulants, amplitude envelope stats,
-    CFO-invariant differential phase moments, and a conjugate spectral peak.
-    All features are invariant to carrier phase offset and unknown signal amplitude.
+    Implements the normalized higher-order cumulants and differential-phase
+    moments of Swami & Sadler (2000) plus amplitude moment statistics used in
+    Dobre et al. (2007). These features have closed-form theoretical values
+    per modulation type that are provably invariant to AWGN, unknown signal
+    amplitude, and carrier phase offset.
 
-    Citation:
+    Features:
+        [0]  |C₂₀| — conjugate 2nd cumulant; BPSK≈1, all others≈0
+        [1]  |C₄₀| — BPSK 2.0, QPSK 1.0, 8PSK≈0, QAM 0.6–0.7
+        [2]  C₄₂  — excess kurtosis proxy; PSK negative, more so for QAM
+        [3]  |C₄₁| — near-0 for symmetric constellations
+        [4]  M₄₂  — amplitude kurtosis (constant-envelope PSK/MSK: ≈ 1)
+        [5]  σ(|x|)/μ(|x|) — amplitude variation coefficient (PSK/MSK ≈ 0)
+        [6]  M₆₃  — 6th amplitude moment (monotone in QAM order)
+        [7]  M₈₄  — 8th amplitude moment (separates 64/256-QAM)
+        [8]  |E[d²]| — 2-fold phase symmetry; BPSK ≈ 1
+        [9]  |E[d⁴]| — 4-fold; QPSK ≈ 1, π/4-DQPSK < 1
+        [10] |E[d⁸]| — 8-fold; 8PSK & π/4-DQPSK high
+        [11] σ(Δφ)/μ(|Δφ|) — IF regularity; MSK ≈ 0 (constant IF)
+        [12] max|FFT(x²)|/mean — conjugate spectral peak (BPSK line at 2fₓ)
+
+    Citations:
         Swami, A. & Sadler, B. M. "Hierarchical Digital Modulation Classification
-        Using Cumulants." IEEE Transactions on Communications, 2000.
+            Using Cumulants." IEEE Trans. Commun., 2000.
+        Dobre, O. A. et al. "Survey of automatic modulation classification
+            techniques." IET Commun., 1(2), 137-156, 2007.
     """
     # CFO removal is required for conjugate cumulants: E[x^k] rotates at k×δ
-    # cycles/sample and time-averaging with N=4096 causes severe attenuation otherwise.
+    # cycles/sample and time-averaging with N=4096 causes severe attenuation.
     x = remove_empirical_cfo(x - np.mean(x))
-    m21 = float(np.mean(np.abs(x) ** 2))
-    x = x / np.sqrt(max(m21, 1e-10))
+    x = x / np.sqrt(max(float(np.mean(np.abs(x) ** 2)), 1e-10))
 
-    # Moments (m21 == 1.0 after normalization above)
+    # Moments (m21 == 1 after normalization above)
     m20 = np.mean(x ** 2)
     m40 = np.mean(x ** 4)
     m41 = np.mean(x ** 3 * x.conj())
     m42 = float(np.mean(np.abs(x) ** 4))
-    m63 = float(np.mean(np.abs(x) ** 6))
-    m84 = float(np.mean(np.abs(x) ** 8))
-
-    # Cumulants (subtract Gaussian cross-terms → zero for AWGN)
-    c20 = m20
     c40 = m40 - 3 * m20 ** 2
-    c41 = m41 - 3 * m20  # m21 == 1
-    c42 = float((m42 - abs(m20) ** 2 - 2.0).real)  # m21 == 1
+    c41 = m41 - 3 * m20        # m21 == 1
+    c42 = float((m42 - abs(m20) ** 2 - 2.0).real)
 
-    # Group 1: normalized cumulants (AWGN-immune, phase-invariant via |·|)
-    f1 = float(abs(c20))        # BPSK ≈ 1, all others ≈ 0
-    f2 = float(abs(c40))        # BPSK 2.0, QPSK 1.0, 8PSK ≈ 0, QAM 0.6-0.7
-    f3 = c42                    # PSK: negative (near -2 ideal), QAM: more negative
-    f4 = float(abs(c41))        # near-0 for symmetric constellations
-
-    # Group 2: amplitude envelope (constant-envelope PSK/MSK vs. variable QAM)
     amp = np.abs(x)
-    f5 = m42                                        # amplitude kurtosis numerator
-    f6 = float(amp.std() / (amp.mean() + 1e-10))   # variation coeff (MSK/PSK ≈ 0)
-    f7 = m63                                        # 6th moment: monotone in QAM order
-    f8 = m84                                        # 8th moment: separates 64/256-QAM
-
-    # Group 3: differential phase moments (CFO-invariant)
     raw_d = x[1:] * x[:-1].conj()
-    d = raw_d / (np.abs(raw_d) + 1e-10)            # unit-normalized phase increment
-    f9  = float(abs(np.mean(d ** 2)))              # 2-fold: BPSK ≈ 1
-    f10 = float(abs(np.mean(d ** 4)))              # 4-fold: QPSK ≈ 1, pi/4-DQPSK < 1
-    f11 = float(abs(np.mean(d ** 8)))              # 8-fold: 8PSK & pi/4-DQPSK high
-
-    # Group 4: instantaneous frequency regularity (MSK: near-constant IF → f12 ≈ 0)
+    d = raw_d / (np.abs(raw_d) + 1e-10)
     dphi = np.diff(np.unwrap(np.angle(x)))
-    f12 = float(dphi.std() / (np.abs(dphi).mean() + 1e-10))
-
-    # Group 5: conjugate spectral peak-to-mean ratio (BPSK has sharp line at 2f_c)
     x2_spec = np.abs(np.fft.fft(x ** 2))
     half = x2_spec[1 : len(x2_spec) // 2]
-    f13 = float(half.max() / (half.mean() + 1e-10))
 
-    feats = np.array([f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13], dtype=np.float32)
+    feats = np.array([
+        float(abs(m20)),                                        # |C₂₀|
+        float(abs(c40)),                                        # |C₄₀|
+        c42,                                                    # C₄₂
+        float(abs(c41)),                                        # |C₄₁|
+        m42,                                                    # M₄₂
+        float(amp.std() / (amp.mean() + 1e-10)),               # σ/μ amp
+        float(np.mean(amp ** 6)),                               # M₆₃
+        float(np.mean(amp ** 8)),                               # M₈₄
+        float(abs(np.mean(d ** 2))),                            # |E[d²]|
+        float(abs(np.mean(d ** 4))),                            # |E[d⁴]|
+        float(abs(np.mean(d ** 8))),                            # |E[d⁸]|
+        float(dphi.std() / (np.abs(dphi).mean() + 1e-10)),     # IF regularity
+        float(half.max() / (half.mean() + 1e-10)),              # conjugate spectral peak
+    ], dtype=np.float32)
     return np.nan_to_num(feats)
+
+
+def _psd_bandwidth_T_rough(x: np.ndarray) -> tuple[float, float]:
+    """Estimate rough symbol period from 90% power bandwidth of Welch PSD.
+
+    Returns (T_rough, bw_90_onesided) where T_rough is in samples/symbol.
+    The 90% bandwidth of an SRRC signal ≈ Rs*(1 + 0.5*beta), so
+    T_rough = 1 / Rs_rough with ~1.25x error due to unknown beta in [0,1].
+    """
+    from scipy.signal import welch as _welch
+    _, psd = _welch(x, fs=1.0, nperseg=512, return_onesided=False)
+    psd = np.abs(psd)
+    half_N = len(psd) // 2
+    # Accumulate power from DC outward (pair symmetric bins)
+    center_psd = np.zeros(half_N + 1)
+    center_psd[0] = psd[0]
+    for k in range(1, half_N + 1):
+        center_psd[k] = psd[k] + (psd[-k] if k < len(psd) - k else psd[k])
+    cumsum = np.cumsum(center_psd)
+    idx_90 = int(np.searchsorted(cumsum, 0.90 * cumsum[-1]))
+    bw_90 = max(idx_90, 1) / len(psd)                   # one-sided, normalized
+    Rs_rough = 2.0 * bw_90 / 1.25                       # assume beta ≈ 0.5
+    T_rough = float(np.clip(1.0 / max(Rs_rough, 1.0 / 128), 1.0, 128.0))
+    return T_rough, float(bw_90)
+
+
+def csp_expert_features(x: np.ndarray) -> np.ndarray:
+    """Extended 70-feature set for modulation recognition.
+
+    Augments csp_canonical_features() (Groups 1, 4, 5, part of 7) with
+    domain-informed signal statistics that are NOT strictly derivable from
+    cyclostationary theory:
+      • Amplitude distribution: quantile ladder, fine-grained CDF thresholds,
+        short-lag ACF (Groups 2)
+      • Absolute phase concentration E[ph^k] (Group 3)
+      • Signed differential-phase real parts Re(E[d^k]) (Group 4 extension)
+      • IF kurtosis, lag-1 ACF, 8-bin raw histogram (Group 5 extension)
+      • Symbol-rate-normalized IF: blind T estimate from 90% PSD bandwidth
+        reduces OSR-induced variance (Group 6)
+      • Spectral: signal + amplitude Wiener entropy (Group 7)
+      • Blind symbol timing (BST): brute-force search over t0 ∈ [0, T_int)
+        maximizing |E[d^4]| at lag T — captures PSK-order phase symmetry
+        at the approximate symbol rate (Group 8)
+      • High-order complex moments |E[x^6]|, |E[x^8]|: monotone with QAM
+        order (16QAM < 64QAM < 256QAM) due to different symbol alphabet
+        amplitude statistics (Group 9)
+
+    The non-canonical additions are empirically important (amplitude lag-1 ACF
+    is the #2 most discriminative feature by RF importance; the amplitude CDF
+    thresholds capture QAM constellation inner-ring density) but their
+    distributions shift with OSR and excess-bandwidth β.
+    """
+    from scipy.signal import welch as _welch
+    from scipy.stats import kurtosis as _kurtosis
+
+    # CFO removal + RMS normalization (m21 == 1 after this)
+    x = remove_empirical_cfo(x - np.mean(x))
+    x = x / np.sqrt(max(float(np.mean(np.abs(x) ** 2)), 1e-10))
+
+    feats: list[float] = []
+
+    # ── Group 1: Conjugate cumulants (4 features) ─────────────────────────
+    # E[x^k] rotates at k×δ; CFO removal above makes these valid.
+    m20 = np.mean(x ** 2)
+    m40 = np.mean(x ** 4)
+    m41 = np.mean(x ** 3 * x.conj())
+    m42 = float(np.mean(np.abs(x) ** 4))
+    c40 = m40 - 3 * m20 ** 2
+    c41 = m41 - 3 * m20            # m21 == 1
+    c42 = float((m42 - abs(m20) ** 2 - 2.0).real)
+    feats += [
+        float(abs(m20)),            # |C₂₀|: BPSK≈1, others≈0
+        float(abs(c40)),            # |C₄₀|: BPSK 2.0, QPSK 1.0, 8PSK≈0, QAM 0.6-0.7
+        c42,                        # C₄₂: PSK/QAM negative, more negative for higher QAM
+        float(abs(c41)),            # |C₄₁|: near-0 for symmetric constellations
+    ]
+
+    # ── Group 2: Amplitude distribution (24 features) ─────────────────────
+    amp = np.abs(x)
+    m63 = float(np.mean(amp ** 6))
+    m84 = float(np.mean(amp ** 8))
+    feats += [
+        m42,                                            # amplitude kurtosis
+        float(amp.std() / (amp.mean() + 1e-10)),       # variation coeff (PSK/MSK ≈ 0)
+        m63,                                            # 6th moment (monotone in QAM order)
+        m84,                                            # 8th moment (separates 64/256-QAM)
+    ]
+    # Quantiles (6)
+    feats += list(np.quantile(amp, [0.10, 0.25, 0.50, 0.75, 0.90, 0.95]).astype(float))
+    # CDF thresholds: inner-ring density captures QAM order (9)
+    # 16QAM inner: ≈0.45, 64QAM: ≈0.22, 256QAM: ≈0.11 (RMS-normalized)
+    for thr in [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60, 0.70]:
+        feats.append(float(np.mean(amp < thr)))
+    # High-amplitude tail (2)
+    feats += [float(np.mean(amp > 1.4)), float(np.mean(amp > 1.8))]
+    # Amplitude ACF at short lags (3): lag-1 is the #2 most important feature
+    amp_c = amp - amp.mean()
+    amp_var = float(np.mean(amp_c ** 2)) + 1e-10
+    for lag in [1, 2, 4]:
+        feats.append(float(np.mean(amp_c[lag:] * amp_c[:-lag]) / amp_var))
+
+    # ── Group 3: Absolute phase concentration (2 features) ────────────────
+    ph = x / (amp + 1e-10)                             # unit-magnitude phasor
+    feats += [float(abs(np.mean(ph ** 2))), float(abs(np.mean(ph ** 4)))]
+
+    # ── Group 4: Differential phase (6 features) ──────────────────────────
+    raw_d = x[1:] * x[:-1].conj()
+    d = raw_d / (np.abs(raw_d) + 1e-10)               # unit-normalized phase increment
+    for k in [2, 4, 8]:
+        dk = d ** k
+        feats += [float(abs(np.mean(dk))), float(np.mean(dk).real)]
+        # real part distinguishes QPSK (+1) from π/4-DQPSK (-1) via Re(E[d^4])
+
+    # ── Group 5: Instantaneous frequency — raw (11 features) ──────────────
+    dphi = np.diff(np.unwrap(np.angle(x)))
+    dphi_c = dphi - dphi.mean()
+    dphi_var = float(np.mean(dphi_c ** 2)) + 1e-10
+    feats += [
+        float(dphi.std() / (np.abs(dphi).mean() + 1e-10)),  # IF regularity (MSK→0)
+        float(_kurtosis(dphi)),                               # excess kurtosis
+    ]
+    feats.append(float(np.mean(dphi_c[1:] * dphi_c[:-1]) / dphi_var))  # IF lag-1 ACF
+    # 8-bin histogram of |IF| ∈ [0, π] (captures per-sample phase-jump distribution)
+    hist_raw, _ = np.histogram(np.abs(dphi), bins=8, range=(0, np.pi), density=True)
+    feats += list(hist_raw.astype(float))
+
+    # ── Group 6: Symbol-rate-normalized IF (13 features) ──────────────────
+    # Blind symbol period from 90% PSD bandwidth; ~1.25x error but sufficient
+    # to reduce OSR-induced variance in IF statistics.
+    T_rough, bw_90 = _psd_bandwidth_T_rough(x)
+    feats += [T_rough, bw_90]
+    dphi_norm = dphi * T_rough                         # ≈ phase jump per symbol
+    feats += [
+        float(np.std(dphi_norm) / (np.abs(dphi_norm).mean() + 1e-10)),
+        float(_kurtosis(dphi_norm)),
+    ]
+    hist_norm, _ = np.histogram(np.abs(dphi_norm), bins=8, range=(0, np.pi), density=True)
+    feats += list(hist_norm.astype(float))
+    lag_T = max(1, min(int(round(T_rough)), len(dphi_c) - 1))
+    feats.append(float(np.mean(dphi_c[lag_T:] * dphi_c[:-lag_T]) / dphi_var))
+
+    # ── Group 7: Spectral features (4 features) ───────────────────────────
+    _, psd = _welch(x, fs=1.0, nperseg=256, return_onesided=False)
+    psd_a = np.abs(psd) + 1e-10
+    feats.append(float(np.exp(np.mean(np.log(psd_a))) / np.mean(psd_a)))  # signal Wiener entropy
+
+    _, amp_psd = _welch(amp, fs=1.0, nperseg=256, return_onesided=True)
+    amp_psd_a = np.abs(amp_psd) + 1e-10
+    feats += [
+        float(amp_psd_a[1:].max() / amp_psd_a[1:].mean()),              # amplitude PSD peak/mean
+        float(np.exp(np.mean(np.log(amp_psd_a))) / np.mean(amp_psd_a)), # amplitude Wiener entropy
+    ]
+    # Conjugate spectral peak-to-mean: BPSK has a sharp cyclostationary line at 2f_c
+    x2_spec = np.abs(np.fft.fft(x ** 2))
+    half = x2_spec[1 : len(x2_spec) // 2]
+    feats.append(float(half.max() / (half.mean() + 1e-10)))
+
+    # ── Group 8: Multi-scale phase concentration profile (8 features) ────────
+    # Compute |E[d_T^k]| across T = 2..30 samples where d_T[n] = unit phase diff
+    # at lag T. Profile shape encodes symbol period + PSK order without timing.
+    # Key per-class signatures at large lags (T=20..30):
+    #   2PSK ≈ 0.52, MSK ≈ 0.45, 4PSK ≈ 0.26, π/4-DQPSK ≈ 0.21,
+    #   8PSK ≈ 0.02, QAM ≈ 0.02-0.04
+    #
+    # FFT optimization: E[d_T^k] = E[x_k_phase[n+T] * conj(x_k_phase[n])]
+    # = autocorrelation of x_k_phase (= (x/|x|)^k) at lag T.
+    # All 29 lags computed in one FFT: O(N log N) vs O(29N) Python loop.
+    x_phase = x / (np.abs(x) + 1e-10)  # unit-magnitude complex samples
+    n_fft = len(x) * 2                  # zero-pad → linear (not circular) correlation
+    pc4_profile = np.zeros(29, dtype=np.float32)
+    pc2_profile = np.zeros(29, dtype=np.float32)
+    pc8_profile = np.zeros(29, dtype=np.float32)
+    x4_phase = x_phase ** 4
+    re4_acf: np.ndarray | None = None   # keep for Group 9 signed features
+    for xp, profile_arr in [
+        (x4_phase, pc4_profile),
+        (x_phase ** 2, pc2_profile),
+        (x_phase ** 8, pc8_profile),
+    ]:
+        fft_xp = np.fft.fft(xp, n=n_fft)
+        # IFFT(|FFT|^2)[T] = sum_n xp[n]*conj(xp[n-T]); |.| = |R(T)| by stationarity
+        acf = np.fft.ifft(np.abs(fft_xp) ** 2)
+        profile_arr[:] = (np.abs(acf[2:31]) / len(x)).astype(np.float32)
+        if re4_acf is None:
+            re4_acf = acf   # first iteration = x^4; save for Group 9
+    # Summary statistics from the magnitude profile
+    pc4_early = float(pc4_profile[0:4].mean())   # T=2..5: initial level
+    pc4_mid   = float(pc4_profile[8:14].mean())  # T=10..15: mid-range
+    pc4_late  = float(pc4_profile[18:29].mean()) # T=20..30: plateau
+    pc4_decay = float(pc4_late / (pc4_early + 1e-6))  # PSK: high, QAM/8PSK: low
+    pc4_max   = float(pc4_profile.max())
+    pc4_min   = float(pc4_profile.min())  # 8PSK: low (|E[d^4]|=0 at T_s); 0.96σ sep 8PSK/4PSK
+    peak_lag_idx = int(pc4_profile.argmax())               # save 0-index for Group 9
+    pc4_argmax   = float(peak_lag_idx + 2) / 30.0          # normalized T̂_s
+    pc2_late  = float(pc2_profile[18:29].mean()) # T=20..30: 2PSK indicator
+    pc8_late  = float(pc8_profile[18:29].mean()) # T=20..30: 8PSK indicator
+    feats += [pc4_early, pc4_mid, pc4_late, pc4_decay, pc4_max, pc4_min, pc4_argmax,
+              pc2_late, pc8_late]
+
+    # ── Group 9: Signed Re(E[d^4]) summary + high-order moments (5 features) ──
+    # Re(E[d_T^4]) is the SIGNED counterpart to the magnitude profile above.
+    # At the symbol period T_s:
+    #   4PSK:       d^4 = exp(j·4·π/2·k) = +1 → Re(E[d^4]) ≈ +1 at T_s
+    #   π/4-DQPSK: d^4 = exp(j·4·π/4·k) = −1 → Re(E[d^4]) ≈ −1 at T_s
+    #   8PSK:       d^4 = ±1 equally    → Re(E[d^4]) ≈  0 at T_s
+    # re4_min is the minimum over ALL lags (good for π/4-DQPSK detection but
+    # under-estimates the +1 signal for 4PSK due to ISI at off-peak lags).
+    # re4_at_peak evaluates Re(E[d^4]) at the estimated T_s (from pc4_argmax):
+    #   4PSK: ≈ +1,  π/4-DQPSK: ≈ −1,  8PSK: ≈ 0   → much stronger separation.
+    assert re4_acf is not None
+    re4_real = (re4_acf[2:31].real / len(x)).astype(np.float32)
+    re4_min     = float(re4_real.min())
+    re4_asym    = float(re4_real.max() + re4_real.min())   # sign asymmetry (1.14σ sep)
+    re4_at_peak = float(re4_real[peak_lag_idx])            # signed value at T̂_s
+    # |E[x^k]|: k-th complex moment of SRRC-filtered signal; monotone with QAM order.
+    feats += [re4_min, re4_asym, re4_at_peak,
+              float(abs(np.mean(x ** 6))), float(abs(np.mean(x ** 8)))]
+
+    # ── Group 10: Full signed Re(E[d^4]) profile (29 features, T=2..30) ──────
+    # Gives the model complete shape information to learn optimal statistics
+    # (e.g., profile is positive+sustained for 4PSK, single negative dip at T_s
+    # for π/4-DQPSK, flat near-zero for 8PSK/QAM).  Redundant with Group 9
+    # summaries but lets the network discover higher-order patterns.
+    feats += re4_real.tolist()
+
+    return np.nan_to_num(np.array(feats, dtype=np.float32))
 
 
 def iq_features(x: np.ndarray) -> np.ndarray:

@@ -52,6 +52,11 @@ def _apf_net_1d(n_classes: int, in_channels: int, **_: object) -> nn.Module:
     return APFNet(n_classes, in_channels=in_channels)
 
 
+def _csp_canonical_mlp(n_classes: int, **_: object) -> nn.Module:
+    from modreczoo.data import N_CSP_CANONICAL_FEATURES
+    return FeatureMLP(n_classes, N_CSP_CANONICAL_FEATURES)
+
+
 def _csp_expert_mlp(n_classes: int, **_: object) -> nn.Module:
     from modreczoo.data import N_CSP_EXPERT_FEATURES
     return FeatureMLP(n_classes, N_CSP_EXPERT_FEATURES)
@@ -144,6 +149,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         _spectrogram_resnet,
         required_channel_format="scf",
     ),
+    "csp_canonical_mlp": ModelSpec("csp_canonical", _csp_canonical_mlp),
     "csp_expert_mlp": ModelSpec("csp_features", _csp_expert_mlp),
 }
 

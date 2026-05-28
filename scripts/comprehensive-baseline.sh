@@ -31,7 +31,7 @@ FLEXIBLE_MODELS=(
   # frequency_cnn
   # spectrogram_cnn
   # spectrogram_resnet
-  # resnet_1d
+  resnet_1d
   # complex_cnn_1d
   dilated_cnn_1d
   patch_transformer_1d
@@ -42,11 +42,11 @@ FLEXIBLE_MODELS=(
 # All channel formats (fixed-format models simply override this internally).
 ALL_FORMATS=(
   real_imag
-  mag_phase
+  # mag_phase
   # differential_complex
   # apf
   complex_powers
-  # multilag
+  multilag
   # cyclic_caf
   # scf
 )
