@@ -865,6 +865,12 @@ def run_config(
         log_common_params(args, model_name, train_signals, test_signals, labels, sweep_index, sweep_total)
         if config_yaml is not None:
             mlflow.log_text(config_yaml, "config.yaml")
+        split_dir = MLFLOW_STAGING / run.info.run_id / "splits"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        np.save(split_dir / "train_idx.npy", splits[0])
+        np.save(split_dir / "val_idx.npy", splits[1])
+        np.save(split_dir / "test_idx.npy", splits[2])
+        mlflow.log_artifacts(str(split_dir), artifact_path="splits")
         result = train_one_model(
             args,
             model_name,
