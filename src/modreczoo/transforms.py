@@ -91,11 +91,17 @@ def differential_complex_channels(x: np.ndarray) -> np.ndarray:
 
 
 def complex_powers_channels(x: np.ndarray) -> np.ndarray:
+    """Return [Re(z), Im(z), Re(z²), Im(z²), Re(z⁴), Im(z⁴)] as a (6, N) array.
+
+    x is expected to be unit-power (from normalize_signal). z², z⁴ are NOT
+    re-normalized independently: their RMS encodes amplitude kurtosis, which is
+    class-discriminative (constant-envelope PSK: RMS(z²)=1; variable-amplitude
+    QAM: RMS(z²)>1). Per-power normalization would discard that information.
+    """
     channels = []
     for power in (1, 2, 4):
         z = x ** power
-        scale = max(np.sqrt(np.mean(np.abs(z) ** 2)), FLOAT_EPS)
-        channels.extend((np.real(z) / scale, np.imag(z) / scale))
+        channels.extend((np.real(z), np.imag(z)))
     return np.stack(channels).astype(np.float32)
 
 
