@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
 
+import numpy as np
+
 from modreczoo.data import EXTRAS_FILE, METADATA_FILE, SIGNALS_FILE, save_dataset
 from modreczoo.simulation import (
     DEFAULT_PARAMS,
@@ -120,14 +122,23 @@ def main() -> None:
                 "num_workers": args.num_workers,
             }
         )
-        signals, metadata, extras = generate_dataset(
+        output_path = Path(args.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        signals_mmap = np.lib.format.open_memmap(
+            str(output_path / SIGNALS_FILE),
+            mode="w+",
+            dtype=np.complex64,
+            shape=(args.n_signals, args.n_samples),
+        )
+        _, metadata, extras = generate_dataset(
             args.modulations,
             args.n_signals,
             params,
             debug=args.debug,
             num_workers=args.num_workers,
+            out=signals_mmap,
         )
-        save_dataset(args.output_dir, signals, metadata, extras=extras)
+        save_dataset(args.output_dir, signals_mmap, metadata, extras=extras)
 
         def _git(*cmd: str) -> str:
             try:

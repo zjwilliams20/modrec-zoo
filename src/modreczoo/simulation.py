@@ -504,10 +504,11 @@ def generate_dataset(
     params: dict,
     debug: bool = False,
     num_workers: int = 1,
+    out: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, pl.DataFrame, Optional[Dict[str, np.ndarray]]]:
     rng = rng_from_seed(params.get("seed"))
     modulations = tuple(modulations)
-    dataset = np.empty((n_signals, params["n_samples"]), dtype=np.complex64)
+    dataset = out if out is not None else np.empty((n_signals, params["n_samples"]), dtype=np.complex64)
     metadata_rows: List[Dict] = []
     debug_arrays: Dict[str, List[np.ndarray]] = {"signal_clean": [], "signal_preshift": []}
     design = sample_parameter_design(n_signals, modulations, params, rng)

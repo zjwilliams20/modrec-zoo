@@ -31,7 +31,10 @@ def save_dataset(
 ) -> None:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    np.save(output / SIGNALS_FILE, signals)
+    target = output / SIGNALS_FILE
+    already_memmapped = isinstance(signals, np.memmap) and Path(signals.filename).resolve() == target.resolve()
+    if not already_memmapped:
+        np.save(target, signals)
     if extras:
         np.savez(output / EXTRAS_FILE, **extras)
     metadata.write_parquet(output / METADATA_FILE)
