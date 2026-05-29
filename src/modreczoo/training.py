@@ -153,6 +153,12 @@ def validate_preprocessor_args(
             f"--preprocessor {name} expects 1D time/frequency tensors, "
             f"but model representation is {representation!r}."
         )
+    if name == "normalize" and channel_format not in {"real_imag", "differential_complex"}:
+        raise ValueError(
+            "--preprocessor normalize computes power by summing channels and "
+            "requires a real/imag channel format (real_imag or differential_complex); "
+            f"got channel_format={channel_format!r}."
+        )
     if name == "radio_transform" and (representation != "time" or channel_format != "real_imag" or in_channels != 2):
         raise ValueError("--preprocessor radio_transform requires time-domain real_imag input with two channels.")
 
