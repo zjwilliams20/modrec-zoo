@@ -5,6 +5,7 @@ import polars as pl
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from modreczoo.auxiliary import MetadataTargetEncoder
 from modreczoo.features import csp_canonical_features, csp_expert_features, iq_features
 from modreczoo.models import representation_for_model
 from modreczoo.transforms import (
@@ -81,6 +82,7 @@ class ModrecDataset(Dataset):
         spectrogram_noverlap: int = 48,
         spectrogram_window: str = "hann",
         n_samples: int | None = None,
+        auxiliary_encoders: tuple[MetadataTargetEncoder, ...] = (),
     ) -> None:
         self.signals = signals
         self.indices = indices.astype(np.int64)
@@ -96,15 +98,27 @@ class ModrecDataset(Dataset):
         self.spectrogram_window = spectrogram_window
         self.n_samples = n_samples
         self.labels = metadata["modulation"].to_numpy()
+        self.auxiliary_targets = {
+            encoder.column: encoder.encode(metadata)
+            for encoder in auxiliary_encoders
+        }
 
     def __len__(self) -> int:
         return len(self.indices)
 
-    def __getitem__(self, item: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, item: int) -> tuple:
         idx = int(self.indices[item])
         x = self._prepare_signal(self.signals[idx])
         y = self.label_to_id[str(self.labels[idx])]
-        return torch.from_numpy(self._features(x)).float(), torch.tensor(y, dtype=torch.long)
+        features = torch.from_numpy(self._features(x)).float()
+        label = torch.tensor(y, dtype=torch.long)
+        if not self.auxiliary_targets:
+            return features, label
+        auxiliary = {
+            name: torch.tensor(targets[idx], dtype=torch.long)
+            for name, targets in self.auxiliary_targets.items()
+        }
+        return features, label, auxiliary
 
     def _prepare_signal(self, x: np.ndarray) -> np.ndarray:
         x = normalize_signal(x)
@@ -166,6 +180,7 @@ def get_data_loader(
     pin_memory: bool = True,
     persistent_workers: bool = True,
     n_samples: int | None = None,
+    auxiliary_encoders: tuple[MetadataTargetEncoder, ...] = (),
     **loader_kwargs,
 ) -> DataLoader:
     dataset = ModrecDataset(
@@ -183,6 +198,7 @@ def get_data_loader(
         spectrogram_noverlap=spectrogram_noverlap,
         spectrogram_window=spectrogram_window,
         n_samples=n_samples,
+        auxiliary_encoders=auxiliary_encoders,
     )
     if num_workers > 0:
         loader_kwargs.setdefault("persistent_workers", persistent_workers)

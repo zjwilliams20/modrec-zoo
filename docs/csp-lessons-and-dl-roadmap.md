@@ -1,6 +1,6 @@
 # CSP Expert Feature Lessons & Deep-Learning Roadmap
 
-*Last updated: 2026-05-28 — 6-model ensemble=81.92% (new best); JointV4-APF running*
+*Last updated: 2026-05-28 — 6-model ensemble=81.92% (baseline_4096); JointCSPCNN on baseline_32768 complete: 4-model ensemble=81.22%*
 
 ---
 
@@ -453,3 +453,155 @@ Even though the signal CNN alone gets 76%, adding 107 CSP features pushes to 80.
 
 This supports using expert features as **additional input channels** in future architectures
 rather than replacing DL with hand-crafted features or vice versa.
+
+---
+
+## 7. Phase Transition Study: Feature Quality vs. Observation Window K (COMPLETE)
+
+### 7.1 Motivation
+
+The baseline_4096 study operated on signals with ~321 symbols (mean T_s ≈ 12.75 samples).
+CSP features are time-averages — their variance decreases with more symbols, so their
+discriminative power improves with K. The open question: **where does the transition occur
+from "too few symbols to reliably distinguish" to "CSP-converged"?**
+
+### 7.2 Literature Basis
+
+- **Gardner (1991)** "Exploitation of Spectral Redundancy in Cyclostationary Signals,"
+  *IEEE Signal Processing Magazine* 8(2):14–36, Sec. IV.
+  Establishes coherent averaging gain: Var(cyclic stat) ∝ 1/K → SNR ∝ √K.
+
+- **Swami & Sadler (2000)** "Hierarchical Digital Modulation Classification Using Cumulants,"
+  *IEEE Transactions on Communications* 48(3):416–429, Eq. (9)–(11).
+  Asymptotic variance of normalized cumulant estimates; 3σ threshold: K >> (σ₀/Δfeature)².
+
+- **Dobre, Abdi, Bar-Ness, Su (2007)** "Survey of Automatic Modulation Classification
+  Techniques: Classical Approaches and New Trends," *IET Communications* 1(2):137–156,
+  Secs. III–IV. Effect of pulse shaping (SRRC) on cumulant feature separability.
+
+### 7.3 Empirical Setup
+
+Dataset: `baseline_32768` — 40k signals × 32,768 samples, 8 balanced classes, SNR 0–30 dB.
+Sweep: K ∈ {64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768} = ~5 to ~2,570 symbols.
+Classifier: ResMLP-256-4b (same as baseline_4096 CSP-only experiments).
+Split: fixed 70/15/15 train/val/test across all K for direct comparability.
+
+### 7.4 Key Empirical Estimate (NOT a literature claim)
+
+Our measured Δ(C₄₂) ≈ 0.0014 for 64 vs 256-QAM after SRRC filtering.
+Using the Swami & Sadler variance formula as a back-of-envelope, this suggests
+thousands of symbols may be required for reliable CSP-based QAM-order discrimination.
+**This is an empirical estimate from our data + literature formula — validate from the sweep.**
+
+### 7.5 Results — Phase Transition Sweep (COMPLETE 2026-05-28)
+
+ResMLP-256-4b, single seed, 30 epochs, 40k signals (5k/class), SNR 0-30 dB.
+Gain/doubling = accuracy increase per 2× increase in K (log-linear view).
+
+```
+K        ~Symbols  Test Acc  Gain/2×K   16QAM  256QAM  4PSK   8PSK   π/4-DQ  MSK
+────────────────────────────────────────────────────────────────────────────────────
+    64          5    0.314      —        —      0.215  0.152  0.241  0.224   —
+   128         10    0.387    +7.3pp     —      0.279  0.287  0.320  0.329   —
+   256         20    0.474    +8.8pp     —      0.288  0.479  0.476  0.476   —
+   512         40    0.558    +8.4pp     —      0.239  0.611  0.568  0.617   —
+  1024         80    0.618    +6.0pp     —      0.339  0.651  0.715  0.652   —
+  2048        161    0.664    +4.6pp     —      0.381  0.704  0.771  0.660   —
+  4096        321    0.704    +4.0pp    0.669   0.479  0.739  0.732  0.725  0.955
+  8192        642    0.737    +3.3pp    —       0.480  0.765  0.767  0.756   —
+ 16384       1285    0.764    +2.6pp    —       0.571  0.803  0.741  0.772   —
+ 32768       2570    0.788    +2.5pp    0.835   0.595  0.815  0.783  0.780  0.996
+────────────────────────────────────────────────────────────────────────────────────
+  baseline_4096 CSP-only ensemble (200k signals): 0.729  (for comparison)
+  baseline_4096 JointCSPCNN ensemble (best):      0.819
+```
+
+**Key findings:**
+
+1. **Not a sharp transition — log-linear growth across all K.**
+   Accuracy grows ~√K (each doubling adds 2.5–8pp), with no clear inflection.
+   The "fast phase" (K<512) yields 8pp/doubling; "slow phase" (K>4096) yields 3pp/doubling.
+
+2. **16QAM benefits most from longer windows (+16.5pp, K=4096→32768).**
+   The amplitude histogram converges slowly because SRRC blends symbol amplitudes
+   across neighboring time steps; more symbols reveal the 4-ring amplitude structure.
+
+3. **MSK converges earliest — 99.6% at K=32768.**
+   Constant instantaneous frequency is an extremely stable feature; reliable
+   within ~100 symbols. Already ~95.5% at K=4096.
+
+4. **QAM (64+256) still improving at K=32768 (+13.9% / +11.6%) — not yet converged.**
+   Consistent with the theoretical prediction that Δ(C₄₂)≈0.0014 requires enormous K.
+   The empirical slope of +2.5pp/doubling at K=32768 implies we'd need K≈500k+ samples
+   to fully converge — beyond what the dataset provides.
+   *(Note: this extrapolation uses the empirical slope, not a literature formula.)*
+
+5. **K=4096 CSP-only result (70.4%) is 2/3 of the way to K=32768 (78.8%).**
+   Adding the JointCSPCNN signal branch at K=4096 jumps to 81.9%, showing that
+   deep learning recovers much of the missing integration gain implicitly.
+
+6. **PSK triangle (4PSK, 8PSK, π/4-DQPSK) converges by ~K=2048 (~160 symbols).**
+   The re4 profile shape is already clear at that point; further K adds little for PSK.
+
+### 7.6 Goal A: JointCSPCNN on baseline_32768 (COMPLETE 2026-05-28)
+
+Architecture adapted for 32768-sample inputs:
+- Stem: Conv1d(6ch, base_ch, 15, stride=8) + MaxPool1d(stride=4) = 32× reduction
+  (vs. 4× for baseline_4096 stem) → same 1024 time steps entering the stages
+- Stages: identical to v2/v2b (4 stages, 1+2+2+2 strides = 8×)
+- Total: 256× downsampling → 128 final steps (same as baseline_4096)
+- Script: `/tmp/train_joint_32768.py`
+
+**Results (4 configs: JointV2×2 seeds + JointV2b×2 seeds):**
+
+```
+Config          Test     Best val   Notes
+----------------|--------|----------|----------------------------------
+JointV2-s0      0.7872   0.7962    LR=1e-3, 60ep
+JointV2-s42     0.7880   0.7867    LR=1e-3, 60ep
+JointV2b-s0     0.7950   0.7955    LR=2e-3, 80ep  ← V2b clearly better
+JointV2b-s42    0.7955   0.7953    LR=2e-3, 80ep
+v2 ensemble     0.7932             seed diversity only
+v2b ensemble    0.8082             big jump from LR diversity
+4-model ens.    0.8122             BEST on baseline_32768
+
+Reference: baseline_4096 6-model ensemble = 0.8192
+```
+
+**Per-class breakdown (32768 4-model vs 4096 6-model):**
+
+```
+Class         32768   4096    Δ       Interpretation
+-------------|--------|--------|-------|---------------------------------------
+16QAM         87.6%   84.6%  +3.0pp  More amplitude samples → 4-ring structure
+256QAM        53.9%   60.0%  -6.1pp  Needs more training examples
+2PSK         100.0%  100.0%  +0.0pp
+4PSK          90.7%   94.2%  -3.5pp  Small-dataset regression (temporal patterns)
+64QAM         54.0%   41.0% +13.0pp  Biggest winner: SRRC amplitude convergence
+8PSK          88.4%   86.9%  +1.5pp
+MSK          100.0%   99.8%  +0.2pp
+π/4-DQPSK    75.2%   88.7% -13.5pp  Biggest loser: needs many training examples
+```
+
+**Key findings from Goal A:**
+
+1. **Individual model ceiling: ~79.6%** — below baseline_4096's ~80.4%.
+   Despite 8× longer signals, only 28k training examples (vs 140k) limits the joint model.
+
+2. **Signal branch adds ~0pp over CSP-only at K=32768** (CSP-only: 78.8%, JointV2-s0: 78.7%).
+   On baseline_4096, the signal branch added +8pp. The dataset-size asymmetry explains this:
+   with 5× fewer examples, the model can't learn complementary patterns beyond what the
+   CSP features already encode.
+
+3. **V2b (LR=2e-3) outperforms V2 (LR=1e-3) by +0.7pp** on the small dataset.
+   On baseline_4096 the two were tied (~80.2–80.4%). Higher LR acts as implicit
+   regularization when the gradient estimate is noisier (small N).
+
+4. **4-model ensemble (81.22%) vs 6-model baseline_4096 (81.92%) = −0.7pp gap.**
+   8× longer signals partially compensate for 5× fewer training signals, but at the
+   ensemble level the comparison is nearly fair given the architectural disadvantage.
+
+5. **Class-specific signal-length effects** are confounded with dataset-size effects:
+   64QAM's +13pp likely reflects SRRC convergence (signal-length effect);
+   π/4-DQPSK's −13.5pp reflects the small training set (dataset-size effect).
+   A controlled experiment (same N signals, varying K) would isolate the two.

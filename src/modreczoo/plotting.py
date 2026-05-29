@@ -455,9 +455,12 @@ def plot_input_examples(
     path: Path,
 ) -> None:
     """Plot one example per class as the model receives it, log-scale clipped for spectrograms."""
+    from modreczoo.auxiliary import unpack_batch
+
     n_classes = len(id_to_label)
     examples: dict = {}
-    for xb, yb in loader:
+    for batch in loader:
+        xb, yb, _ = unpack_batch(batch)
         for x, y in zip(xb, yb):
             cls = int(y.item())
             if cls not in examples:

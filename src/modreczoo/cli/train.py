@@ -12,6 +12,7 @@ from modreczoo.training import (
     CFO_SWEEP_MODES,
     CHANNEL_FORMATS,
     MODEL_NAMES,
+    PREPROCESSOR_NAMES,
     configure_mlflow,
     dataset_sample_indices,
     iter_sweep_args,
@@ -74,6 +75,27 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--transformer-d-model", type=int, default=128)
     parser.add_argument("--transformer-n-heads", type=int, default=4)
     parser.add_argument("--transformer-n-layers", type=int, default=4)
+    parser.add_argument(
+        "--preprocessor",
+        choices=PREPROCESSOR_NAMES,
+        default="none",
+        help="Optional differentiable Torch frontend. Defaults to the existing dataset preprocessing path.",
+    )
+    parser.add_argument("--preprocessor-channels", type=int, default=None)
+    parser.add_argument("--preprocessor-kernel-size", type=int, default=31)
+    parser.add_argument("--preprocessor-max-time-shift", type=float, default=8.0)
+    parser.add_argument("--preprocessor-max-frequency-shift", type=float, default=0.02)
+    parser.add_argument("--preprocessor-max-phase-shift", type=float, default=float(np.pi))
+    parser.add_argument(
+        "--aux-targets",
+        nargs="+",
+        default=None,
+        help="Metadata columns to predict as auxiliary classification heads, e.g. snr_db osr ebw channel.",
+    )
+    parser.add_argument("--aux-bins", type=int, default=8, help="Quantile bins for numeric auxiliary metadata targets.")
+    parser.add_argument("--aux-loss-weight", type=float, default=0.2)
+    parser.add_argument("--aux-loss-mode", choices=("fixed", "uncertainty"), default="fixed")
+    parser.add_argument("--aux-head-hidden", type=int, default=0)
     parser.add_argument("--sweep-channel-formats", nargs="+", default=list(CHANNEL_FORMATS))
     parser.add_argument("--sweep-cfo-estimators", nargs="+", default=["lag_correlation"])
     parser.add_argument("--sweep-batch-sizes", nargs="+", type=int, default=None)

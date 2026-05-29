@@ -41,6 +41,47 @@ Potential research directions include:
 * Architectures: generative stuff, KAN?
 * Better algorithms for uncertainty awareness
 
+## Differentiable Frontends and Auxiliary Tasks
+
+The default training path still uses the dataset-level NumPy/SciPy preprocessing
+and single modulation classifier. Opt-in differentiable frontends run inside the
+PyTorch model with `--preprocessor`:
+
+```bash
+uv run modreczoo-train \
+  --dataset-dir data/baseline_4096 \
+  --models resnet_1d \
+  --preprocessor radio_transform \
+  --aux-targets snr_db osr ebw channel
+```
+
+Available frontends:
+* `none`: existing behavior.
+* `normalize`: differentiable per-example centering/RMS normalization.
+* `learned_fir`: identity-initialized learnable FIR filterbank.
+* `radio_transform`: identity-initialized learned time/frequency/phase correction
+  for time-domain `real_imag` I/Q.
+
+Auxiliary metadata heads are hard-parameter-sharing classifiers attached to the
+backbone pre-logit feature. Numeric metadata targets are quantile-binned from
+the training split (`--aux-bins`, default 8); categorical columns use observed
+training values plus missing/unknown classes. Loss weighting defaults to a fixed
+auxiliary weight (`--aux-loss-weight`, default 0.2), with optional homoscedastic
+uncertainty weighting via `--aux-loss-mode uncertainty`.
+
+The interface follows:
+* [Radio Transformer Networks](https://arxiv.org/abs/1605.00716): learned
+  synchronization/normalization for modulation recognition.
+* [Spatial Transformer Networks](https://arxiv.org/abs/1506.02025):
+  differentiable sampling for learned input transforms.
+* [SincNet](https://arxiv.org/abs/1808.00158) and
+  [LEAF](https://arxiv.org/abs/2101.08596): trainable frontends replacing fixed
+  handcrafted filterbanks.
+* [Caruana's multi-task learning formulation](https://www.cs.cornell.edu/~caruana/mlj97.pdf):
+  shared representations trained from related labels.
+* [Kendall, Gal, and Cipolla](https://arxiv.org/abs/1705.07115): optional
+  homoscedastic uncertainty weighting for multi-task losses.
+
 ## Usage
 
 Install the project in editable mode with uv:

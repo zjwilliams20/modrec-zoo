@@ -16,6 +16,12 @@ from mlflow.tracking import MlflowClient
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
+from modreczoo.auxiliary import (
+    auxiliary_class_counts,
+    auxiliary_target_info,
+    build_metadata_target_encoders,
+    unpack_batch,
+)
 from modreczoo.data import get_data_loader, load_dataset
 from modreczoo.evaluation import (
     accuracy_by_ebw,
@@ -33,7 +39,9 @@ from modreczoo.evaluation import (
     write_summary,
 )
 from modreczoo.models import MODEL_NAMES, make_model, representation_for_model, required_channel_format_for
+from modreczoo.models.wrappers import ModelWithPreprocessor, MultiTaskModel, forward_all
 from modreczoo.oracle import load_oracle_cache, oracle_cache_status
+from modreczoo.preprocessing import PREPROCESSOR_NAMES, make_preprocessor
 from modreczoo.reporting import build_prediction_table, error_slice_table, write_performance_explorer
 
 
@@ -74,7 +82,8 @@ def model_io_info(
     channel_format: str,
     device: torch.device,
 ) -> Tuple[Dict[str, Any], np.ndarray, Any]:
-    sample_x, _ = train_loader.dataset[0]
+    sample = train_loader.dataset[0]
+    sample_x = sample[0]
     input_example = sample_x.unsqueeze(0).cpu().numpy()
     model.eval()
     with torch.no_grad():
@@ -92,6 +101,60 @@ def model_io_info(
         input_example,
         infer_signature(input_example, output_example),
     )
+
+
+def safe_metric_name(name: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in name)
+
+
+def log_auxiliary_accuracy_metrics(prefix: str, metrics: Dict, step: int | None = None) -> None:
+    for name, values in metrics.get("auxiliary", {}).items():
+        mlflow.log_metric(f"{prefix}_{safe_metric_name(name)}_accuracy", values["accuracy"], step=step)
+
+
+def multitask_loss(
+    model: torch.nn.Module,
+    outputs: dict[str, torch.Tensor],
+    labels: torch.Tensor,
+    auxiliary: dict[str, torch.Tensor] | None,
+    aux_loss_weight: float,
+    aux_loss_mode: str,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    losses = {"modulation": F.cross_entropy(outputs["modulation"], labels)}
+    if auxiliary:
+        for name, target in auxiliary.items():
+            if name in outputs:
+                losses[name] = F.cross_entropy(outputs[name], target)
+
+    if aux_loss_mode == "uncertainty" and hasattr(model, "loss_log_vars"):
+        total = losses["modulation"].new_tensor(0.0)
+        for name, loss in losses.items():
+            log_var = model.loss_log_vars[name]  # type: ignore[attr-defined, index]
+            total = total + torch.exp(-log_var) * loss + 0.5 * log_var
+        return total, losses
+
+    auxiliary_losses = [loss for name, loss in losses.items() if name != "modulation"]
+    total = losses["modulation"]
+    if auxiliary_losses:
+        total = total + aux_loss_weight * sum(auxiliary_losses) / len(auxiliary_losses)
+    return total, losses
+
+
+def validate_preprocessor_args(
+    name: str,
+    representation: str,
+    channel_format: str,
+    in_channels: int,
+) -> None:
+    if name == "none":
+        return
+    if representation not in {"time", "frequency"}:
+        raise ValueError(
+            f"--preprocessor {name} expects 1D time/frequency tensors, "
+            f"but model representation is {representation!r}."
+        )
+    if name == "radio_transform" and (representation != "time" or channel_format != "real_imag" or in_channels != 2):
+        raise ValueError("--preprocessor radio_transform requires time-domain real_imag input with two channels.")
 
 
 def stratified_split(labels: np.ndarray, train_frac: float, val_frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -201,6 +264,7 @@ def evaluate_and_log_test_set(
     seed: int,
     device: torch.device,
     n_samples: Optional[int] = None,
+    auxiliary_tasks: dict[str, int] | None = None,
 ) -> Dict:
     from modreczoo.plotting import (
         plot_accuracy_by_ebw,
@@ -214,7 +278,7 @@ def evaluate_and_log_test_set(
     )
     labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
     loader = get_data_loader(signals, metadata, idx, label_to_id, shuffle=False, n_samples=n_samples, **loader_kwargs)
-    test_metrics = evaluate(model, loader, device, len(label_to_id), desc=name)
+    test_metrics = evaluate(model, loader, device, len(label_to_id), desc=name, auxiliary_tasks=auxiliary_tasks)
     del loader
     gc.collect()
     accuracy_bootstrap = bootstrap_accuracy(test_metrics["y_true"], test_metrics["y_pred"], seed=seed)
@@ -389,6 +453,7 @@ def evaluate_and_log_test_set(
     mlflow.log_artifact(str(explorer_path), artifact_path=reports_path)
 
     mlflow.log_metric(f"{name}_accuracy", test_metrics["accuracy"])
+    log_auxiliary_accuracy_metrics(name, test_metrics)
     mlflow.log_metric(
         f"{name}_accuracy_ci_half_width",
         (accuracy_bootstrap["ci_upper"] - accuracy_bootstrap["ci_lower"]) / 2.0,
@@ -430,11 +495,22 @@ def train_one_model(
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     representation = representation_for_model(model_name)
     channel_format = effective_channel_format_for(model_name, args.channel_format)
+    base_input_channels = input_channels_for(representation, channel_format)
+    validate_preprocessor_args(args.preprocessor, representation, channel_format, base_input_channels)
+    preprocessor, model_input_channels = make_preprocessor(
+        args.preprocessor,
+        base_input_channels,
+        out_channels=args.preprocessor_channels,
+        kernel_size=args.preprocessor_kernel_size,
+        max_time_shift=args.preprocessor_max_time_shift,
+        max_frequency_shift=args.preprocessor_max_frequency_shift,
+        max_phase_shift=args.preprocessor_max_phase_shift,
+    )
     model, representation = make_model(
         model_name,
         len(label_to_id),
         train_signals.shape[1],
-        in_channels=input_channels_for(representation, channel_format),
+        in_channels=model_input_channels,
         spectrogram_base_channels=args.spectrogram_base_channels,
         spectrogram_freq_kernel=args.spectrogram_freq_kernel,
         spectrogram_time_kernel=args.spectrogram_time_kernel,
@@ -443,11 +519,28 @@ def train_one_model(
         transformer_n_heads=args.transformer_n_heads,
         transformer_n_layers=args.transformer_n_layers,
     )
+    if preprocessor is not None:
+        model = ModelWithPreprocessor(model, preprocessor)
+
+    train_idx, val_idx, test_idx = splits
+    auxiliary_encoders = build_metadata_target_encoders(
+        train_metadata,
+        train_idx,
+        args.aux_targets,
+        n_bins=args.aux_bins,
+    )
+    auxiliary_tasks = auxiliary_class_counts(auxiliary_encoders)
+    if auxiliary_tasks:
+        model = MultiTaskModel(
+            model,
+            auxiliary_tasks,
+            hidden_dim=args.aux_head_hidden,
+            uncertainty_weighting=args.aux_loss_mode == "uncertainty",
+        )
     model.to(device)
     mlflow.log_param("model_name", model_name)
     mlflow.log_param("representation", representation)
 
-    train_idx, val_idx, test_idx = splits
     loader_kwargs = dict(
         model_name=model_name,
         channel_format=channel_format,
@@ -460,6 +553,7 @@ def train_one_model(
         spectrogram_nperseg=args.spectrogram_nperseg,
         spectrogram_noverlap=args.spectrogram_noverlap,
         spectrogram_window=args.spectrogram_window,
+        auxiliary_encoders=auxiliary_encoders,
     )
     train_loader = get_data_loader(train_signals, train_metadata, train_idx, label_to_id, shuffle=True, **loader_kwargs)
     val_loader = get_data_loader(val_signals, val_metadata, val_idx, label_to_id, shuffle=False, **loader_kwargs)
@@ -480,27 +574,51 @@ def train_one_model(
             unit="batch",
             leave=False,
         )
-        for xb, yb in train_bar:
+        loss_totals: dict[str, float] = {}
+        for batch in train_bar:
+            xb, yb, auxiliary = unpack_batch(batch)
             sync_if_cuda(device)
             xb, yb = xb.to(device), yb.to(device)
+            if auxiliary is not None:
+                auxiliary = {name: target.to(device) for name, target in auxiliary.items()}
             sync_if_cuda(device)
 
             optimizer.zero_grad(set_to_none=True)
-            loss = F.cross_entropy(model(xb), yb)
+            outputs = forward_all(model, xb) if auxiliary_tasks else {"modulation": model(xb)}
+            loss, losses = multitask_loss(
+                model,
+                outputs,
+                yb,
+                auxiliary,
+                args.aux_loss_weight,
+                args.aux_loss_mode,
+            )
             loss.backward()
             optimizer.step()
             sync_if_cuda(device)
 
             total_loss += loss.item() * len(yb)
+            for name, value in losses.items():
+                loss_totals[name] = loss_totals.get(name, 0.0) + value.item() * len(yb)
             train_bar.set_postfix(loss=f"{loss.item():.4f}")
 
         train_duration = time.perf_counter() - train_start
-        val_metrics = evaluate(model, val_loader, device, len(label_to_id), desc="val")
+        val_metrics = evaluate(
+            model,
+            val_loader,
+            device,
+            len(label_to_id),
+            desc="val",
+            auxiliary_tasks=auxiliary_tasks or None,
+        )
         train_loss = total_loss / max(len(train_loader.dataset), 1)
         epoch_duration = time.perf_counter() - epoch_start
         train_samples_per_sec = len(train_loader.dataset) / max(train_duration, np.finfo(float).eps)
         mlflow.log_metric("train_loss", train_loss, step=epoch)
+        for name, loss_total in loss_totals.items():
+            mlflow.log_metric(f"train_{safe_metric_name(name)}_loss", loss_total / max(len(train_loader.dataset), 1), step=epoch)
         mlflow.log_metric("val_accuracy", val_metrics["accuracy"], step=epoch)
+        log_auxiliary_accuracy_metrics("val", val_metrics, step=epoch)
         mlflow.log_metric("epoch_duration_sec", epoch_duration, step=epoch)
         mlflow.log_metric("train_samples_per_sec", train_samples_per_sec, step=epoch)
         epoch_bar.set_postfix(
@@ -521,6 +639,14 @@ def train_one_model(
     parameter_counts = model_parameter_counts(model)
     model_info, input_example, signature = model_io_info(
         model, train_loader, id_to_label, representation, channel_format, device
+    )
+    model_info.update(
+        {
+            "preprocessor": args.preprocessor,
+            "preprocessor_input_channels": base_input_channels,
+            "preprocessor_output_channels": model_input_channels,
+            "auxiliary_targets": auxiliary_target_info(auxiliary_encoders),
+        }
     )
     mlflow.log_params(parameter_counts)
     mlflow.log_dict({**parameter_counts, **model_info}, "model_info.json")
@@ -548,6 +674,7 @@ def train_one_model(
         "test", model, test_signals, test_metadata, test_idx,
         label_to_id, id_to_label, loader_kwargs, artifact_dir,
         args.test_dataset_dir_effective, args.seed, device,
+        auxiliary_tasks=auxiliary_tasks or None,
     )
     labels_ordered = [id_to_label[i] for i in range(len(id_to_label))]
     for extra_dir in (extra_test_dirs or []):
@@ -563,6 +690,7 @@ def train_one_model(
                 label_to_id, id_to_label, loader_kwargs, artifact_dir,
                 extra_dir, args.seed, device,
                 n_samples=train_signals.shape[1],
+                auxiliary_tasks=auxiliary_tasks or None,
             )
         finally:
             del extra_signals, extra_metadata, extra_idx
@@ -695,6 +823,11 @@ def run_name_for(args: argparse.Namespace, model_name: str) -> str:
     name = f"{model_name}-{args.channel_format}-bs{args.batch_size}-{cfo_label(args)}"
     if representation_for_model(model_name) == "spectrogram":
         name += f"-f{args.spectrogram_freq_bins}-t{args.spectrogram_time_bins}"
+    if getattr(args, "preprocessor", "none") != "none":
+        name += f"-pp{args.preprocessor}"
+    if getattr(args, "aux_targets", None):
+        aux = "_".join(safe_metric_name(name) for name in args.aux_targets)
+        name += f"-aux{aux}"
     return name
 
 
@@ -765,6 +898,18 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--spectrogram-freq-kernel must be a positive odd integer.")
     if args.spectrogram_time_kernel % 2 == 0 or args.spectrogram_time_kernel < 1:
         raise ValueError("--spectrogram-time-kernel must be a positive odd integer.")
+    if args.preprocessor not in PREPROCESSOR_NAMES:
+        raise ValueError(f"--preprocessor must be one of {', '.join(PREPROCESSOR_NAMES)}.")
+    if args.preprocessor_kernel_size % 2 == 0 or args.preprocessor_kernel_size < 1:
+        raise ValueError("--preprocessor-kernel-size must be a positive odd integer.")
+    if args.preprocessor_channels is not None and args.preprocessor_channels <= 0:
+        raise ValueError("--preprocessor-channels must be positive.")
+    if args.aux_bins < 2:
+        raise ValueError("--aux-bins must be at least 2.")
+    if args.aux_loss_weight < 0:
+        raise ValueError("--aux-loss-weight must be non-negative.")
+    if args.aux_head_hidden < 0:
+        raise ValueError("--aux-head-hidden must be non-negative.")
 
 
 def validate_known_labels(metadata: pl.DataFrame, labels: List[str], dataset_dir: str, role: str) -> None:
@@ -828,6 +973,17 @@ def log_common_params(
             "transformer_d_model": args.transformer_d_model,
             "transformer_n_heads": args.transformer_n_heads,
             "transformer_n_layers": args.transformer_n_layers,
+            "preprocessor": getattr(args, "preprocessor", "none"),
+            "preprocessor_channels": getattr(args, "preprocessor_channels", None) or "input",
+            "preprocessor_kernel_size": getattr(args, "preprocessor_kernel_size", 31),
+            "preprocessor_max_time_shift": getattr(args, "preprocessor_max_time_shift", 8.0),
+            "preprocessor_max_frequency_shift": getattr(args, "preprocessor_max_frequency_shift", 0.02),
+            "preprocessor_max_phase_shift": getattr(args, "preprocessor_max_phase_shift", float(np.pi)),
+            "aux_targets": json.dumps(getattr(args, "aux_targets", None) or []),
+            "aux_bins": getattr(args, "aux_bins", 8),
+            "aux_loss_weight": getattr(args, "aux_loss_weight", 0.2),
+            "aux_loss_mode": getattr(args, "aux_loss_mode", "fixed"),
+            "aux_head_hidden": getattr(args, "aux_head_hidden", 0),
             "labels": json.dumps(labels),
             "sweep_index": sweep_index,
             "sweep_total": sweep_total,

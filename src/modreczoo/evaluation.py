@@ -12,15 +12,30 @@ from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_f
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from modreczoo.auxiliary import unpack_batch
+from modreczoo.models.wrappers import forward_all
 
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, n_classes: int, desc: str = "eval") -> Dict:
+
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    n_classes: int,
+    desc: str = "eval",
+    auxiliary_tasks: dict[str, int] | None = None,
+) -> Dict:
     model.eval()
     y_true, y_pred, y_conf, nll_bits = [], [], [], []
     true_prob, top2_pred, top2_conf = [], [], []
+    auxiliary_correct = {name: 0 for name in (auxiliary_tasks or {})}
+    auxiliary_total = {name: 0 for name in (auxiliary_tasks or {})}
     with torch.no_grad():
-        for xb, yb in tqdm(loader, desc=desc, unit="batch", leave=False):
+        for batch in tqdm(loader, desc=desc, unit="batch", leave=False):
+            xb, yb, auxiliary = unpack_batch(batch)
+            xb_device = xb.to(device)
             yb_device = yb.to(device)
-            logits = model(xb.to(device))
+            outputs = forward_all(model, xb_device) if auxiliary_tasks else {"modulation": model(xb_device)}
+            logits = outputs["modulation"]
             batch_nll_bits = F.cross_entropy(logits, yb_device, reduction="none") / np.log(2.0)
             probs = torch.softmax(logits, dim=1)
             conf, pred = probs.max(dim=1)
@@ -35,12 +50,18 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, n_class
             top2_pred.extend(second_pred.cpu().tolist())
             top2_conf.extend(second_conf.cpu().tolist())
             y_true.extend(yb.tolist())
+            if auxiliary_tasks and auxiliary is not None:
+                for name in auxiliary_tasks:
+                    aux_target = auxiliary[name].to(device)
+                    aux_pred = outputs[name].argmax(dim=1)
+                    auxiliary_correct[name] += int((aux_pred == aux_target).sum().item())
+                    auxiliary_total[name] += int(aux_target.numel())
     y_true_np = np.asarray(y_true, dtype=int)
     y_pred_np = np.asarray(y_pred, dtype=int)
     y_conf_np = np.asarray(y_conf, dtype=np.float32)
     nll_bits_np = np.asarray(nll_bits, dtype=np.float32)
     labels = np.arange(n_classes)
-    return {
+    result = {
         "accuracy": float(accuracy_score(y_true_np, y_pred_np)) if len(y_true_np) else 0.0,
         "confusion": confusion_matrix(y_true_np, y_pred_np, labels=labels),
         "y_true": y_true_np,
@@ -51,6 +72,15 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, n_class
         "top2_pred": np.asarray(top2_pred, dtype=int),
         "top2_confidence": np.asarray(top2_conf, dtype=np.float32),
     }
+    if auxiliary_tasks:
+        result["auxiliary"] = {
+            name: {
+                "accuracy": auxiliary_correct[name] / max(auxiliary_total[name], 1),
+                "n": auxiliary_total[name],
+            }
+            for name in auxiliary_tasks
+        }
+    return result
 
 
 def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]) -> pl.DataFrame:

@@ -555,6 +555,8 @@ def _install_legacy_model_aliases() -> None:
 
 
 def _last_linear(model: torch.nn.Module) -> tuple[str, torch.nn.Linear]:
+    if hasattr(model, "embedding_layer"):
+        return model.embedding_layer()  # type: ignore[no-any-return, attr-defined]
     last = None
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
