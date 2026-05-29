@@ -6,6 +6,7 @@ import torch.nn as nn
 from .complex import ComplexCNN1D
 from .cnn import CNN1D, CNN2D
 from .dilated import DilatedCNN1D
+from .joint import JointCSPAttn, JointCSPCNN, JointCSPDual
 from .mlp import FeatureMLP
 from .multiscale import MultiScalePyramidNet
 from .resnet import ResNet1D, ResNet2D
@@ -153,6 +154,21 @@ MODEL_SPECS: dict[str, ModelSpec] = {
     ),
     "csp_canonical_mlp": ModelSpec("csp_canonical", _csp_canonical_mlp),
     "csp_expert_mlp": ModelSpec("csp_features", _csp_expert_mlp),
+    "joint_csp_cnn": ModelSpec(
+        "joint_csp",
+        lambda n_classes, **_: JointCSPCNN(n_classes),
+        required_channel_format=None,
+    ),
+    "joint_csp_attn": ModelSpec(
+        "joint_csp",
+        lambda n_classes, **_: JointCSPAttn(n_classes),
+        required_channel_format=None,
+    ),
+    "joint_csp_dual": ModelSpec(
+        "joint_csp",
+        lambda n_classes, **_: JointCSPDual(n_classes),
+        required_channel_format=None,
+    ),
 }
 
 MODEL_NAMES = tuple(MODEL_SPECS)

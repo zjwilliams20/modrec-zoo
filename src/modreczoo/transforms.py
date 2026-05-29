@@ -80,6 +80,8 @@ def complex_channels(x: np.ndarray, channel_format: str) -> np.ndarray:
         return multilag_channels(x)
     if channel_format == "cyclic_caf":
         return cyclic_caf_channels(x)
+    if channel_format == "unit_phasor_powers":
+        return unit_phasor_powers_channels(x)
     raise ValueError(f"Unsupported channel format: {channel_format}")
 
 
@@ -102,6 +104,36 @@ def complex_powers_channels(x: np.ndarray) -> np.ndarray:
     for power in (1, 2, 4):
         z = x ** power
         channels.extend((np.real(z), np.imag(z)))
+    return np.stack(channels).astype(np.float32)
+
+
+def unit_phasor_powers_channels(x: np.ndarray) -> np.ndarray:
+    """Return [Re(u²), Im(u²), Re(u⁴), Im(u⁴), Re(u⁸), Im(u⁸)] as a (6, N) array,
+    where u = x / (|x| + ε) is the unit phasor.
+
+    Complementary to ``complex_powers_channels``:
+    - ``complex_powers`` uses z², z⁴ retaining amplitude (class-discriminative for QAM)
+    - ``unit_phasor_powers`` uses u², u⁴ REMOVING amplitude (pure phase discrimination)
+
+    The u⁴ channel is the signal whose autocorrelation at lag T gives the signed
+    re4 profile Re(E[u⁴[n]·conj(u⁴[n−T])]), the key discriminant for PSK modulation
+    order (Swami & Sadler 2000 IEEE TC 48(3):416-429):
+      - 4PSK: Re(E[d_T⁴]) ≈ +1 (sustained plateau)
+      - π/4-DQPSK: positive then negative dip (unique shape)
+      - 8PSK: Re(E[d_T⁴]) → 0 (rapid decay)
+
+    A 1D CNN on u⁴ channels implicitly learns this profile through its convolutional
+    kernels, without requiring explicit symbol-period estimation or FFT.
+
+    Also useful as an additional stream in multi-stream or joint architectures: combining
+    ``complex_powers`` (amplitude-sensitive) with ``unit_phasor_powers`` (phase-sensitive)
+    gives the full discriminative picture.
+    """
+    u = x / (np.abs(x) + FLOAT_EPS)
+    channels = []
+    for power in (2, 4, 8):
+        up = u ** power
+        channels.extend((np.real(up), np.imag(up)))
     return np.stack(channels).astype(np.float32)
 
 

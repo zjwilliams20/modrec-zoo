@@ -49,7 +49,7 @@ CFO_ESTIMATORS = ("lag_correlation", "phase_slope", "spectral_centroid")
 CFO_SWEEP_MODES = ("raw", *CFO_ESTIMATORS)
 CHANNEL_FORMATS = (
     "real_imag", "mag_phase", "differential_complex",
-    "apf", "complex_powers", "multilag", "cyclic_caf", "scf",
+    "apf", "complex_powers", "unit_phasor_powers", "multilag", "cyclic_caf", "scf",
 )
 SNR_BIN_WIDTH = 4.0
 MLFLOW_DIR = Path("mlflow").absolute()
@@ -735,9 +735,12 @@ def effective_channel_format_for(model_name: str, requested_format: str) -> str:
 def input_channels_for(representation: str, channel_format: str) -> int:
     if representation in ("iq_features", "csp_features", "csp_canonical"):
         return 1
+    if representation == "joint_csp":
+        from modreczoo.features import N_CSP_EXPERT_FEATURES
+        return 6 + N_CSP_EXPERT_FEATURES  # 113
     if channel_format == "apf":
         return 4
-    if channel_format == "complex_powers":
+    if channel_format in ("complex_powers", "unit_phasor_powers"):
         return 6
     if channel_format == "multilag":
         return 6

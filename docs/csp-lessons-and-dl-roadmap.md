@@ -1,6 +1,6 @@
 # CSP Expert Feature Lessons & Deep-Learning Roadmap
 
-*Last updated: 2026-05-28 — 6-model ensemble=81.92% (baseline_4096); JointCSPCNN on baseline_32768 complete: 4-model ensemble=81.22%*
+*Last updated: 2026-05-29 — 6-model ensemble=81.92% (baseline_4096); JointCSPCNN on baseline_32768 4-model ensemble=81.22%; Phase transition sweep on 200k DONE: CSP-only K=32768 = 81.43%; JointV2-s0 on 200k DONE: test=85.57% (+4.14pp over CSP-only); 5 configs remaining*
 
 ---
 
@@ -605,3 +605,166 @@ MSK          100.0%   99.8%  +0.2pp
    64QAM's +13pp likely reflects SRRC convergence (signal-length effect);
    π/4-DQPSK's −13.5pp reflects the small training set (dataset-size effect).
    A controlled experiment (same N signals, varying K) would isolate the two.
+
+---
+
+## 8. Controlled Experiment: baseline_32768_200k (phase transition DONE; arch search running)
+
+### 8.1 Motivation
+
+The 40k sweep (Section 7) confounded two variables:
+- **Signal-length effect**: longer K → better CSP integration → higher accuracy
+- **Dataset-size effect**: baseline_32768_40k has 5× fewer training examples than baseline_4096
+
+`baseline_32768_200k` (200k signals × 32768 samples) holds dataset size fixed at 200k
+while using 8× longer signals than baseline_4096. This isolates signal-length effects.
+
+### 8.2 Experiments Running
+
+**A) Phase Transition Sweep** (`/tmp/phase_transition_200k.py`):
+- K ∈ {64, 128, ..., 32768} on 200k signals (140k/30k/30k split)
+- Same ResMLP-256-4b classifier as 40k sweep
+- Δ vs 40k at each K isolates dataset-size contribution
+- Feature cache: `/tmp/phase_trans_200k_feats/feats_K{K}.npy`
+- Timing: ~183s/K (IPC-overhead dominated; all 10 K values take ~30 min)
+
+**B) Architecture Search** (`/tmp/train_joint_200k.py`):
+- 6 configs: JointCSPCNN (V2×2 + V2b×2 seeds) + JointCSPAttn (V2b×2 seeds)
+- `JointCSPAttn` replaces GAP with learned temporal attention pooling (+33k params)
+  Motivated by: pi/4-DQPSK phase transitions are temporally structured; 32768-sample
+  signals have sufficient temporal context for attention to discriminate positions.
+- Auto-launched when K=32768 CSP features ready (cache reused, no duplicate computation)
+- CSP cache: `/tmp/csp_200k_features.npy` (copied from K=32768 phase transition cache)
+
+### 8.3 Hotpath Integrations (2026-05-29)
+
+New models and utilities added to `src/modreczoo/models/` and `src/modreczoo/`:
+
+**`joint_csp_attn`** (`models/joint.py`, `models/registry.py`):
+- Same as `joint_csp_cnn` but signal branch uses `_AttentionPool1D` instead of GAP
+- Additive attention: score = Tanh(Linear(C→C//2)) → Linear(C//2→1) → softmax → weighted sum
+- Works for any input length (handles K=4096 and K=32768 equally)
+- 932,872 params (vs 899,848 for GAP variant; +33k for attention scorer)
+- Registered for use via `modreczoo-train --models joint_csp_attn`
+
+**`joint_csp_dual`** (`models/joint.py`, `models/registry.py`):
+- Signal branch with 12-channel input: `complex_powers` (6ch) + `unit_phasor_powers` (6ch)
+- `unit_phasor_powers` is computed from the first 2 complex_powers channels IN THE FORWARD PASS
+  (u = z/(|z|+ε), then u², u⁴, u⁸ by iterative squaring). No data pipeline changes needed.
+- Theoretical motivation: complementary representations. complex_powers retains amplitude
+  kurtosis (QAM/PSK separator); unit_phasor_powers removes amplitude (PSK order discriminant).
+  The ResNet can allocate early filters to amplitude variation, later filters to phase structure.
+- Only +1,344 params vs JointCSPCNN (901,192 vs 899,848): overhead is the first Conv1d only
+- Registered for use via `modreczoo-train --models joint_csp_dual`
+
+**`unit_phasor_powers`** channel format (`transforms.py`, `training.py`):
+- 6-channel format: [Re(u²), Im(u²), Re(u⁴), Im(u⁴), Re(u⁸), Im(u⁸)] where u = x/(|x|+ε)
+- Complements `complex_powers`: pure phase discrimination, amplitude-invariant
+- u⁴ channel enables CNNs to implicitly learn the signed re4 cyclostationary profile
+  (4PSK: Re(u⁴)=1; π/4-DQPSK: Re(u⁴)=-1; 8PSK: Re(u⁴)≈0 — Swami & Sadler 2000)
+- Registered as channel format: `modreczoo-train --sweep-channel-formats unit_phasor_powers`
+
+**`OnlineModrecDataset`** (`data.py`):
+- `IterableDataset` that generates signals on-the-fly using `simulation.generate_signal`
+- Matches `baseline_32768_200k` parameter distribution (SNR ∈ [0,30] dB, AWGN, uniform sampling)
+- Worker-safe: each DataLoader worker has an independent seeded RNG
+- Use case: unlimited training data; effective data augmentation for large models or overfitting scenarios
+- Per-signal: ~2ms signal gen + ~3ms CSP features (K=32768) → 8 workers yield ~400 signals/s
+- API: `get_online_data_loader(label_to_id, model_name, batch_size, num_workers, steps_per_epoch)`
+
+### 8.4 Phase Transition Results (200k, 2026-05-29)
+
+**Finding: Dataset-size and signal-length effects are separable and additive.**
+
+Phase transition sweep complete (9/10 K values; K=32768 pending):
+
+```
+  K       ~Sym   200k acc  40k acc   Δ(data)   Notes
+  ─────────────────────────────────────────────────
+     64      5    0.3230    0.3140   +0.009    outlier: noise floor
+    128     10    0.4130    0.3870   +0.026
+    256     20    0.5031    0.4740   +0.029
+    512     40    0.5850    0.5580   +0.027
+   1024     80    0.6452    0.6180   +0.027
+   2048    161    0.6931    0.6640   +0.029
+   4096    321    0.7309    0.7040   +0.027
+   8192    643    0.7599    0.7370   +0.023
+  16384   1285    0.7880    0.7640   +0.024
+  32768   2570    0.8143    0.7880   +0.026    DONE
+
+  Mean Δ(200k − 40k) for K ≥ 128: +0.027 pp
+```
+
+**Per-class gain from K=4096 → K=32768 (200k CSP-only):**
+
+```
+  Class       K=4096   K=32768    Δ       Note
+  ────────────────────────────────────────────────
+  64-QAM       0.429    0.614   +0.185   QAM needs many symbols
+  16-QAM       0.722    0.862   +0.140   QAM amplitude converges slowly
+  256-QAM      0.507    0.639   +0.132   highest-order QAM, hardest
+  4-PSK        0.787    0.856   +0.069
+  8-PSK        0.722    0.765   +0.043
+  2-PSK        0.932    0.976   +0.044   simple BPSK; converges fast
+  pi/4-DQPSK   0.783    0.810   +0.027   unique signed d^4 profile
+  MSK          0.965    0.993   +0.028   constant envelope; trivial
+```
+
+CSP-only ceiling at K=32768, 200k: **81.43%** (vs 40k: 78.8%, vs JointCSP ensemble 40k: 81.22%)
+
+**Key findings:**
+
+1. **Feature-noise floor at K=64**: Only +0.9pp improvement from 5× more data. At ~5 symbols,
+   estimation noise of CSP features dominates — more training samples can't compensate for
+   per-signal noise. This is distinct from the integration-gain phase boundary.
+
+2. **Separability**: For K ≥ 128, the dataset-size gain (+2.7pp) is constant and independent
+   of K. The phase transition curve shifts up uniformly; 5× more data does not change the
+   slope of integration gain, only the intercept.
+
+3. **Diminishing data returns**: The 40k → 200k gain (+2.7pp) is smaller than the K=4096 →
+   K=32768 gain (+5.6pp for 40k). Signal-length (more CSP integration) is more valuable than
+   more training examples at this feature regime.
+
+4. **Class-heterogeneous integration**: QAM classes (64-QAM: +18.5pp, 16-QAM: +14.0pp) gain
+   far more from longer K than PSK/MSK. QAM needs both amplitude AND phase statistics to
+   converge; PSK relies primarily on phase, which converges faster.
+
+5. **CSP-only at K=32768, 200k nearly matches JointCSPCNN ensemble at 40k (81.22%)**: The
+   signal branch may add less on 200k than expected, since CSP features themselves are stronger.
+
+### 8.5 Architecture Search Results (200k, IN PROGRESS)
+
+Architecture search (`train_joint_200k.py`) running on GPU — 6 configs, ~3 min/epoch:
+- JointV2-s0, JointV2-s42   — JointCSPCNN, 899k params, LR=1e-3, 60 epochs
+- JointV2b-s0, JointV2b-s42 — JointCSPCNN, 899k params, LR=2e-3, 80 epochs
+- AttnV2b-s0, AttnV2b-s42   — JointCSPAttn (attention pooling), 932k params, LR=2e-3, 80 epochs
+
+**Interim results (JointV2-s0):**
+
+```
+  Epoch   val     best    Note
+  ──────────────────────────────────────────────────────
+    10    0.7533  0.7981  peak LR (destabilized); true best ~ep8
+    20    0.7994  0.8108  converging; within 0.35pp of CSP-only
+    30    0.8172  0.8492  ★ ABOVE CSP-ONLY by +3.49pp; best peaked ~ep26
+    40    0.8444  0.8492  val recovered; best unchanged — plateau forming
+    50    0.8403  0.8572  best ticked up +0.80pp — still improving in LR tail
+  CSP-only (200k, K=32768):  0.8143   ← ceiling beaten by +4.29pp at ep50
+```
+
+    60    0.8462  0.8572  training complete — best unchanged from ep50
+  CSP-only (200k, K=32768):  0.8143   ← beaten by +4.14pp
+
+  [JointV2-s0] Test: 0.8557  (best val: 0.8572)
+
+Signal branch contribution at 200k scale:
+  Test accuracy:   85.57%
+  vs CSP-only:     +4.14pp (81.43%)
+  vs 40k ensemble: +4.35pp (81.22%)
+  Val/test gap:    0.15pp (very healthy generalization)
+
+JointV2-s42 started — 5 configs remaining.
+
+Expected arch search completion: ~21.8h from 02:21 (≈ 23:00 today).
+Reference: CSP-only (200k, K=32768) = 81.43%; beaten at epoch 30 (JointV2-s0).
