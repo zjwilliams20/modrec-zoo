@@ -114,9 +114,11 @@ def quick_train(
     loader: DataLoader,
     epochs: int,
     device: torch.device,
+    snapshot_fn=None,   # called as snapshot_fn(epoch) after each epoch if not None
+    snapshot_every: int = 1,
 ) -> None:
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(epochs, 1))
     model.train()
     for epoch in range(1, epochs + 1):
         total_loss = n_total = 0
@@ -131,7 +133,12 @@ def quick_train(
             n_total += len(yb)
             bar.set_postfix(loss=f"{loss.item():.4f}")
         sched.step()
-        print(f"  epoch {epoch:2d}/{epochs}  loss={total_loss / n_total:.4f}")
+        print(f"  epoch {epoch:2d}/{epochs}  loss={total_loss / n_total:.4f}", end="")
+        if snapshot_fn is not None and epoch % snapshot_every == 0:
+            snapshot_fn(epoch)
+            model.train()
+        else:
+            print()
 
 
 def compute_losses(
@@ -149,6 +156,24 @@ def compute_losses(
             losses.extend(batch_losses.cpu().tolist())
             indices.extend(idxs.tolist())
     return np.array(losses, dtype=np.float32), np.array(indices, dtype=np.int64)
+
+
+def col_gradient_weights(
+    losses: np.ndarray,
+    global_indices: np.ndarray,
+    metadata: pl.DataFrame,
+    col_meta: str,
+    col_edges: list,
+    n_col: int,
+) -> np.ndarray:
+    """Return per-column gradient weight percentages (shape: n_col)."""
+    col_vals = metadata[col_meta].to_numpy()[global_indices]
+    col_bins = assign_bins(col_vals, col_edges)
+    weights = np.array([
+        losses[col_bins == j].sum() for j in range(n_col)
+    ], dtype=np.float64)
+    total = weights.sum()
+    return (weights / total * 100.0) if total > 0 else weights
 
 
 def compute_exact_grad_norms(
@@ -297,6 +322,8 @@ def main() -> None:
                         help="Column axis for breakdown table (default: symbol_period)")
     parser.add_argument("--val-frac", type=float, default=0.2, help="Fraction held out for analysis (not trained on)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--snapshot-every", type=int, default=2,
+                        help="Record gradient weight trajectory every N epochs (0 = only before/after)")
     parser.add_argument("--exact-grads", action="store_true", help="Also compute exact per-sample gradient norms")
     parser.add_argument("--grad-subset", type=int, default=500, help="Samples for exact gradient computation")
     args = parser.parse_args()
@@ -333,20 +360,6 @@ def main() -> None:
         batch_size=args.batch_size, shuffle=False,
     )
 
-    if args.checkpoint:
-        state = torch.load(args.checkpoint, map_location=device)
-        model.load_state_dict(state)
-        print(f"Loaded checkpoint: {args.checkpoint}")
-    else:
-        print(f"\nTraining {model_name} for {args.epochs} epochs on {len(train_idx)} samples …")
-        quick_train(model, train_loader, args.epochs, device)
-
-    print(f"\nComputing per-sample losses on val set ({len(val_idx)} samples) …")
-    losses, global_idx = compute_losses(model, val_loader, device)
-
-    print(f"\nOverall mean NLL:  {losses.mean():.4f} nats  ({losses.mean() / np.log(2):.4f} bits)")
-    print(f"Chance-level NLL:  {np.log(n_classes):.4f} nats  ({np.log2(n_classes):.4f} bits)")
-
     if args.col_axis == "symbol_period":
         col_edges, col_labels, col_meta = SP_EDGES, SP_LABELS, "symbol_period"
         col_axis_label = "symbol_period"
@@ -355,6 +368,51 @@ def main() -> None:
         col_axis_label = "osr"
 
     n_col = len(col_labels)
+    trajectory: list[tuple[int, np.ndarray]] = []   # (epoch, col_weights)
+
+    def snapshot(epoch: int) -> None:
+        l, gi = compute_losses(model, val_loader, device)
+        w = col_gradient_weights(l, gi, metadata, col_meta, col_edges, n_col)
+        trajectory.append((epoch, w))
+        bar = "  ".join(f"{col_labels[j]} {w[j]:4.1f}%" for j in range(n_col))
+        print(f"  ← {bar}")
+
+    # epoch-0 snapshot (random init)
+    snapshot(0)
+
+    if args.checkpoint:
+        state = torch.load(args.checkpoint, map_location=device)
+        model.load_state_dict(state)
+        print(f"Loaded checkpoint: {args.checkpoint}")
+        snapshot(args.epochs)
+    else:
+        print(f"\nTraining {model_name} for {args.epochs} epochs on {len(train_idx)} samples …")
+        snap_every = args.snapshot_every if args.snapshot_every > 0 else args.epochs + 1
+        quick_train(model, train_loader, args.epochs, device,
+                    snapshot_fn=snapshot, snapshot_every=snap_every)
+        # ensure final epoch is captured if not already
+        if not trajectory or trajectory[-1][0] != args.epochs:
+            snapshot(args.epochs)
+
+    print(f"\nComputing per-sample losses on val set ({len(val_idx)} samples) …")
+    losses, global_idx = compute_losses(model, val_loader, device)
+
+    print(f"\nOverall mean NLL:  {losses.mean():.4f} nats  ({losses.mean() / np.log(2):.4f} bits)")
+    print(f"Chance-level NLL:  {np.log(n_classes):.4f} nats  ({np.log2(n_classes):.4f} bits)")
+
+    # Trajectory table
+    col_w = 8
+    row_w = 7
+    hdr = f"{'epoch':>{row_w}}" + "".join(f"{c:>{col_w}}" for c in col_labels)
+    width = row_w + col_w * n_col
+    print(f"\nGRADIENT WEIGHT TRAJECTORY  [col={col_axis_label}]")
+    print("=" * width)
+    print(hdr)
+    print("-" * width)
+    for ep, w in trajectory:
+        tag = " ← random init" if ep == 0 else ""
+        print(f"{ep:>{row_w}d}" + "".join(f"{w[j]:>{col_w}.1f}%" for j in range(n_col)) + tag)
+    print("=" * width)
 
     grid, snr_labels, row_totals, col_totals, count_grid = build_bin_grid(
         losses, global_idx, metadata, args.snr_bin_width,
