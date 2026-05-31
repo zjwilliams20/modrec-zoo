@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 """
-Gradient dominance breakdown by (SNR, OSR) bin.
+Gradient dominance breakdown by (SNR, col-axis) bin.
 
 Per-sample cross-entropy loss proxies gradient magnitude contribution to
 each update step: ||dL/dz||_2 = sqrt(2*(1-p_y)) is monotone in L = -log(p_y).
 
 Trains a small model briefly (--epochs, default 10) OR loads a checkpoint,
-then reports mean loss and fractional gradient weight per (SNR, OSR) bin.
+then reports mean loss and fractional gradient weight per (SNR, col-axis) bin.
+
+Default column axis is symbol_period (log-octave bins [2,4), [4,8), [8,16))
+since that is the primary axis of variation in the default simulation setup.
 
 Usage:
-  # 1. Generate data
+  # 1. Generate data with default params
   uv run modreczoo-simulate generate --output-dir data/breakdown \\
-      --n-signals 4000 --channel awgn --sampler sobol \\
-      --snr-range -20 30 --osr-range 1 20 --seed 0
+      --n-signals 4000 --channel awgn --sampler sobol --seed 0
 
   # 2. Run breakdown (trains briefly inside)
   uv run python scripts/gradient_snr_osr_breakdown.py --dataset-dir data/breakdown
 
-  # 3. With a pre-trained checkpoint (skip internal training)
+  # 3. Use OSR as column axis instead
+  uv run python scripts/gradient_snr_osr_breakdown.py \\
+      --dataset-dir data/breakdown --col-axis osr
+
+  # 4. With a pre-trained checkpoint (skip internal training)
   uv run python scripts/gradient_snr_osr_breakdown.py \\
       --dataset-dir data/breakdown --checkpoint path/to/model.pt
 
-  # 4. Also compute exact per-sample gradient norms (slow)
+  # 5. Also compute exact per-sample gradient norms (slow)
   uv run python scripts/gradient_snr_osr_breakdown.py \\
       --dataset-dir data/breakdown --exact-grads --grad-subset 500
 """
@@ -44,13 +50,17 @@ from modreczoo.training import SNR_BIN_WIDTH, input_channels_for
 
 OSR_EDGES = [1.0, 2.0, 4.0, 8.0, 16.0, np.inf]
 OSR_LABELS = ["[1,2)", "[2,4)", "[4,8)", "[8,16)", "[16,∞)"]
-N_OSR_BINS = len(OSR_LABELS)
+
+# Log-octave bins for symbol_period: [2,4), [4,8), [8,16)
+SP_EDGES = [2, 4, 8, 16]
+SP_LABELS = ["[2,4)", "[4,8)", "[8,16)"]
 
 
-def osr_bin(osr: np.ndarray) -> np.ndarray:
-    idx = np.zeros(len(osr), dtype=int)
-    for i in range(1, N_OSR_BINS):
-        idx[osr >= OSR_EDGES[i]] = i
+def assign_bins(values: np.ndarray, edges: list) -> np.ndarray:
+    """Assign each value to a bin index based on edges (right edge exclusive)."""
+    idx = np.zeros(len(values), dtype=int)
+    for i in range(1, len(edges) - 1):
+        idx[values >= edges[i]] = i
     return idx
 
 
@@ -185,27 +195,31 @@ def build_bin_grid(
     global_indices: np.ndarray,
     metadata: pl.DataFrame,
     snr_bin_width: float,
-) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
+    col_meta: str,
+    col_edges: list,
+    col_labels: list[str],
+) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray]:
     """
-    Returns (grid, snr_labels, row_totals, col_totals).
-    grid shape: (n_snr_bins, N_OSR_BINS), NaN where count == 0.
+    Returns (grid, snr_labels, row_totals, col_totals, count_grid).
+    grid shape: (n_snr_bins, n_col_bins), NaN where count == 0.
     """
     snr = metadata["snr_db"].to_numpy()[global_indices]
-    osr = metadata["osr"].to_numpy()[global_indices]
+    col_vals = metadata[col_meta].to_numpy()[global_indices]
 
     snr_bin_starts = np.floor(snr / snr_bin_width) * snr_bin_width
     unique_snr_bins = sorted(np.unique(snr_bin_starts))
     snr_labels = [f"{int(s):+d}dB" for s in unique_snr_bins]
-    osr_bins = osr_bin(osr)
+    col_bins = assign_bins(col_vals, col_edges)
+    n_col = len(col_labels)
 
     n_snr = len(unique_snr_bins)
-    grid_sum = np.zeros((n_snr, N_OSR_BINS))
-    grid_cnt = np.zeros((n_snr, N_OSR_BINS), dtype=int)
+    grid_sum = np.zeros((n_snr, n_col))
+    grid_cnt = np.zeros((n_snr, n_col), dtype=int)
 
     for i, snr_start in enumerate(unique_snr_bins):
         snr_mask = snr_bin_starts == snr_start
-        for j in range(N_OSR_BINS):
-            mask = snr_mask & (osr_bins == j)
+        for j in range(n_col):
+            mask = snr_mask & (col_bins == j)
             if mask.sum() > 0:
                 grid_sum[i, j] = values[mask].sum()
                 grid_cnt[i, j] = mask.sum()
@@ -233,6 +247,8 @@ def print_table(
     row_totals: np.ndarray | None = None,
     col_totals: np.ndarray | None = None,
     suffix: str = "",
+    row_axis_label: str = "SNR",
+    col_axis_label: str = "",
 ) -> None:
     col_w = 9
     row_w = 9
@@ -242,8 +258,8 @@ def print_table(
 
     print(f"\n{title}")
     print("=" * width)
-    snr_osr_label = "SNR\\OSR"
-    header = f"{snr_osr_label:>{row_w}}" + "".join(f"{c:>{col_w}}" for c in col_labels)
+    corner = f"{row_axis_label}" + (f"\\{col_axis_label}" if col_axis_label else "")
+    header = f"{corner:>{row_w}}" + "".join(f"{c:>{col_w}}" for c in col_labels)
     if has_totals:
         header += f"{'ALL':>{col_w}}"
     print(header)
@@ -277,6 +293,8 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=None, help="Load model state_dict instead of training")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--snr-bin-width", type=float, default=SNR_BIN_WIDTH)
+    parser.add_argument("--col-axis", default="symbol_period", choices=["symbol_period", "osr"],
+                        help="Column axis for breakdown table (default: symbol_period)")
     parser.add_argument("--val-frac", type=float, default=0.2, help="Fraction held out for analysis (not trained on)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exact-grads", action="store_true", help="Also compute exact per-sample gradient norms")
@@ -329,42 +347,56 @@ def main() -> None:
     print(f"\nOverall mean NLL:  {losses.mean():.4f} nats  ({losses.mean() / np.log(2):.4f} bits)")
     print(f"Chance-level NLL:  {np.log(n_classes):.4f} nats  ({np.log2(n_classes):.4f} bits)")
 
+    if args.col_axis == "symbol_period":
+        col_edges, col_labels, col_meta = SP_EDGES, SP_LABELS, "symbol_period"
+        col_axis_label = "symbol_period"
+    else:
+        col_edges, col_labels, col_meta = OSR_EDGES, OSR_LABELS, "osr"
+        col_axis_label = "osr"
+
+    n_col = len(col_labels)
+
     grid, snr_labels, row_totals, col_totals, count_grid = build_bin_grid(
-        losses, global_idx, metadata, args.snr_bin_width
+        losses, global_idx, metadata, args.snr_bin_width,
+        col_meta, col_edges, col_labels,
     )
+
+    shared = dict(row_totals=row_totals, col_totals=col_totals,
+                  row_axis_label="SNR", col_axis_label=col_axis_label)
 
     print_table(
-        grid, snr_labels, OSR_LABELS,
-        title="MEAN NLL (nats) — proxy for per-sample gradient magnitude",
-        fmt=".3f",
-        row_totals=row_totals,
-        col_totals=col_totals,
+        grid, snr_labels, col_labels,
+        title=f"MEAN NLL (nats) — proxy for per-sample gradient magnitude  [col={col_axis_label}]",
+        fmt=".3f", **shared,
     )
 
-    # Gradient weight: mean_loss * count as fraction of total loss mass
+    # Gradient weight: mean_loss × count / total_loss_mass
     total_mass = np.nansum(grid * count_grid)
     weight_pct = np.where(count_grid > 0, grid * count_grid / total_mass * 100.0, np.nan)
-    row_w_totals = np.array([
-        np.nansum(weight_pct[i]) for i in range(len(snr_labels))
-    ])
-    col_w_totals = np.array([
-        np.nansum(weight_pct[:, j]) for j in range(N_OSR_BINS)
-    ])
+    row_w_totals = np.array([np.nansum(weight_pct[i]) for i in range(len(snr_labels))])
+    col_w_totals = np.array([np.nansum(weight_pct[:, j]) for j in range(n_col)])
     print_table(
-        weight_pct, snr_labels, OSR_LABELS,
-        title="GRADIENT WEIGHT (%) = mean_loss × count / total_loss_mass",
+        weight_pct, snr_labels, col_labels,
+        title=f"GRADIENT WEIGHT (%) = mean_loss × count / total_loss_mass  [col={col_axis_label}]",
         fmt=".1f",
-        row_totals=row_w_totals,
-        col_totals=col_w_totals,
+        row_totals=row_w_totals, col_totals=col_w_totals,
+        row_axis_label="SNR", col_axis_label=col_axis_label,
     )
 
     print_table(
-        count_grid.astype(float), snr_labels, OSR_LABELS,
-        title="SAMPLE COUNT per (SNR, OSR) bin",
+        count_grid.astype(float), snr_labels, col_labels,
+        title=f"SAMPLE COUNT per bin  [col={col_axis_label}]",
         fmt=".0f",
         row_totals=count_grid.sum(axis=1).astype(float),
         col_totals=count_grid.sum(axis=0).astype(float),
+        row_axis_label="SNR", col_axis_label=col_axis_label,
     )
+
+    # Summary line: per-column gradient weight totals to highlight imbalance
+    print(f"\nColumn gradient weight summary ({col_axis_label}):")
+    for label, w in zip(col_labels, col_w_totals):
+        bar = "#" * int(round(w / 2))
+        print(f"  {label:>8s}  {w:5.1f}%  {bar}")
 
     if args.exact_grads:
         print(f"\nComputing exact gradient norms for {args.grad_subset} random val samples …")
@@ -372,14 +404,15 @@ def main() -> None:
             model, val_loader, device, args.grad_subset, args.seed
         )
         g_grid, _, g_row_totals, g_col_totals, _ = build_bin_grid(
-            grad_norms, grad_idx, metadata, args.snr_bin_width
+            grad_norms, grad_idx, metadata, args.snr_bin_width,
+            col_meta, col_edges, col_labels,
         )
         print_table(
-            g_grid, snr_labels, OSR_LABELS,
-            title="MEAN GRADIENT L2 NORM (exact, random subset)",
+            g_grid, snr_labels, col_labels,
+            title=f"MEAN GRADIENT L2 NORM (exact, random subset)  [col={col_axis_label}]",
             fmt=".4f",
-            row_totals=g_row_totals,
-            col_totals=g_col_totals,
+            row_totals=g_row_totals, col_totals=g_col_totals,
+            row_axis_label="SNR", col_axis_label=col_axis_label,
         )
 
 
