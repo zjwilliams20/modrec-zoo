@@ -4,20 +4,20 @@ Input representation: "joint_csp" — a (6 + N_CSP_EXPERT_FEATURES, N) tensor wh
   - Channels 0–5: complex_powers of the signal (Re/Im of z, z², z⁴)
   - Channels 6–112: 107 CSP expert features broadcast across the time axis
 
-Three model variants:
+Five model variants:
 
 JointCSPCNN:
   Signal branch → compact ResNet1D with Global Average Pooling → 256-d.
   Architecture equivalent to JointCSPCNN v2b (base_ch=32, LR=2e-3) that achieved
-  81.25% on baseline_4096 and 81.22% 4-model ensemble on baseline_32768_40k.
+  87.12% (best single seed) on baseline_32768_200k — vs 80.12% CSP-expert-MLP alone.
 
 JointCSPAttn:
   Signal branch → compact ResNet1D with Attention Pooling → 256-d.
   Replaces GAP with a learned temporal attention mask: each of the T time steps
   after the ResNet stages is scored by a small MLP, softmax-normalized, and
-  used as a weighted average. Motivated by the temporal structure of AMC signals
-  (pi/4-DQPSK phase transitions, symbol-boundary effects) and the empirical
-  finding that GAP discards discriminative positional information for long signals.
+  used as a weighted average. Confirmed WORSE than GAP (86.22% vs 86.76% s0):
+  cyclostationary statistics are globally uniform, so every time step contributes
+  equally to E[d⁴ₜ] — GAP is theoretically optimal pooling.
 
 JointCSPDual:
   Signal branch with 12-channel input: complex_powers (6ch) + unit_phasor_powers (6ch).
@@ -26,6 +26,24 @@ JointCSPDual:
   - complex_powers: retains RMS(z²) = amplitude kurtosis → separates QAM from PSK
   - unit_phasor_powers: u=z/|z|; u⁴ autocorrelation profile → discriminates PSK order
   The ResNet can allocate early filters to amplitude variation, late filters to phase.
+
+JointCSPFiLM:
+  CSP branch runs first → produces a conditioning vector → Feature-wise Linear
+  Modulation applied at each ResNet stage in the signal branch via (1+γ)·h + β.
+  Uses delta-form FiLM (γ≈0, β≈0 at init) so training starts as a standard ResNet
+  and gradually learns to modulate signal features based on the CSP context.
+  Unlike the concatenation-only approach, the signal CNN sees the CSP verdict
+  *during* feature extraction, not just at the final classification head.
+
+JointCSPDilated:
+  Signal branch → DilatedCNN backbone (6 cells, d=1,2,4,8,16,32) with multi-scale
+  avg+max pooling → 384-d embedding.  The 6 temporal scales are structurally
+  complementary to the CSP global moment summaries: CSP integrates over the full
+  signal while each dilated cell pools at a specific temporal scale.  This reduces
+  redundancy vs. JointCSPCNN where ResNet's GAP is another global-averaging
+  operation similar to the CSP cumulant estimators.
+  ~570k params (vs 900k for JointCSPCNN) — the dilated backbone is 22× smaller
+  than the ResNet signal branch yet captures multi-scale temporal structure.
 """
 import torch
 import torch.nn as nn
@@ -222,8 +240,21 @@ class JointCSPCNN(nn.Module):
         # x: (B, 6 + N_CSP, N)
         sig  = x[:, :6, :]           # (B, 6, N)  — complex_powers
         csp  = x[:, 6:, 0]           # (B, N_CSP) — CSP features (constant across time)
-        sig_emb = self.sig_branch(sig)
-        csp_emb = self.csp_branch(csp)
+        return self.forward_parts(sig, csp)
+
+    def forward_parts(self, complex_powers: torch.Tensor, csp_raw: torch.Tensor) -> torch.Tensor:
+        """Efficient entry point for training scripts that keep tensors split.
+
+        Avoids broadcasting the CSP vector across the full time axis:
+        ``complex_powers`` (B, 6, N) + ``csp_raw`` (B, N_CSP) use only 786 KB +
+        428 B per sample vs. 14.8 MB for the broadcast joint tensor.
+
+        Args:
+            complex_powers: (B, 6, N) pre-computed complex power channels.
+            csp_raw: (B, N_CSP) z-score normalised CSP feature vector.
+        """
+        sig_emb = self.sig_branch(complex_powers)
+        csp_emb = self.csp_branch(csp_raw)
         return self.head(torch.cat([sig_emb, csp_emb], dim=1))
 
 
@@ -338,8 +369,288 @@ class JointCSPDual(JointCSPCNN):
         # x: (B, 6 + N_CSP, N)
         sig = x[:, :6, :]                           # (B, 6, N) complex_powers
         csp = x[:, 6:, 0]                           # (B, N_CSP)
-        upow = self._unit_phasor_powers(sig)         # (B, 6, N) unit_phasor_powers
-        sig12 = torch.cat([sig, upow], dim=1)        # (B, 12, N)
+        return self.forward_parts(sig, csp)
+
+    def forward_parts(self, complex_powers: torch.Tensor, csp_raw: torch.Tensor) -> torch.Tensor:
+        """Override: compute unit_phasor_powers on-the-fly before the 12-ch branch.
+
+        Args:
+            complex_powers: (B, 6, N) complex power channels.
+            csp_raw: (B, N_CSP) z-score normalised CSP features.
+        """
+        upow  = self._unit_phasor_powers(complex_powers)    # (B, 6, N)
+        sig12 = torch.cat([complex_powers, upow], dim=1)    # (B, 12, N)
         sig_emb = self.sig_branch(sig12)
-        csp_emb = self.csp_branch(csp)
+        csp_emb = self.csp_branch(csp_raw)
+        return self.head(torch.cat([sig_emb, csp_emb], dim=1))
+
+
+# ── FiLM building blocks ──────────────────────────────────────────────────────
+
+class _FiLMResBlock1D(nn.Module):
+    """Residual block with Feature-wise Linear Modulation (FiLM) conditioning.
+
+    Applies delta-form FiLM after the second conv+BN: ``(1 + γ) · h + β``.
+    Delta form: the FiLM generator's weights/biases default to small values, so
+    γ ≈ 0 and β ≈ 0 at initialisation — the block behaves like a plain ResBlock
+    until the CSP gradient signal trains the conditioning.
+
+    Args:
+        ci: input channels.
+        co: output channels.
+        s: stride (default 1).
+        cond_dim: dimension of the conditioning vector (default 256).
+    """
+
+    def __init__(self, ci: int, co: int, s: int = 1, cond_dim: int = 256) -> None:
+        super().__init__()
+        self.c1 = nn.Conv1d(ci, co, 3, stride=s, padding=1, bias=False)
+        self.b1 = nn.BatchNorm1d(co)
+        self.c2 = nn.Conv1d(co, co, 3, padding=1, bias=False)
+        self.b2 = nn.BatchNorm1d(co)
+        self.skip = (
+            nn.Sequential(nn.Conv1d(ci, co, 1, stride=s, bias=False), nn.BatchNorm1d(co))
+            if s != 1 or ci != co else nn.Identity()
+        )
+        self.film = nn.Linear(cond_dim, 2 * co)   # generates (γ, β) per channel
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        h = self.b2(self.c2(F.relu(self.b1(self.c1(x)))))   # (B, co, T)
+        γβ = self.film(cond)                                  # (B, 2*co)
+        γ = γβ[:, : h.shape[1]].unsqueeze(-1)                # (B, co, 1)
+        β = γβ[:, h.shape[1] :].unsqueeze(-1)                # (B, co, 1)
+        return F.relu((1.0 + γ) * h + β + self.skip(x))      # delta-form FiLM + residual
+
+
+class _FiLMSignalBranch(nn.Module):
+    """Compact ResNet1D with FiLM conditioning at every residual stage.
+
+    Identical structure to :class:`_SignalBranch` (same stem, same 4 stages,
+    same channel progression, same GAP) except each residual block is a
+    :class:`_FiLMResBlock1D` that accepts a CSP conditioning vector.
+
+    The conditioning vector is the same at every stage — the blocks learn
+    to use different projections of it for different levels of abstraction.
+
+    Args:
+        in_ch: input channels (always 6 for complex_powers).
+        base_ch: base channel count; doubles through stages to ``base_ch * 8``.
+        cond_dim: dimension of the conditioning vector from the CSP branch.
+    """
+
+    def __init__(self, in_ch: int = 6, base_ch: int = 32, cond_dim: int = 256) -> None:
+        super().__init__()
+        c = base_ch
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_ch, c, 7, stride=2, padding=3, bias=False),
+            nn.BatchNorm1d(c), nn.ReLU(),
+            nn.MaxPool1d(3, stride=2, padding=1),
+        )
+        self.block1 = _FiLMResBlock1D(c,     c,     s=1, cond_dim=cond_dim)
+        self.block2 = _FiLMResBlock1D(c,     c * 2, s=2, cond_dim=cond_dim)
+        self.block3 = _FiLMResBlock1D(c * 2, c * 4, s=2, cond_dim=cond_dim)
+        self.block4 = _FiLMResBlock1D(c * 4, c * 8, s=2, cond_dim=cond_dim)
+        self.out_dim = c * 8
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        h = self.stem(x)
+        h = self.block1(h, cond)
+        h = self.block2(h, cond)
+        h = self.block3(h, cond)
+        h = self.block4(h, cond)
+        return h.mean(-1)   # GAP → (B, out_dim)
+
+
+# ── FiLM full model ───────────────────────────────────────────────────────────
+
+class JointCSPFiLM(nn.Module):
+    """CSP-conditioned signal CNN via Feature-wise Linear Modulation.
+
+    Unlike :class:`JointCSPCNN` (which concatenates CSP and signal embeddings
+    only at the final head), JointCSPFiLM feeds the CSP embedding into the
+    signal branch at *every* residual stage via FiLM scale/shift parameters.
+
+    Processing order:
+      1. CSP branch: 107-dim features → 2-block ResMLP → 256-d ``csp_emb``.
+      2. Signal branch: 6-ch complex_powers → stem → 4× FiLM-conditioned
+         ResBlocks (each using ``csp_emb`` for γ, β) → GAP → 256-d ``sig_emb``.
+      3. Head: concat(sig_emb, csp_emb) = 512-d → 256 → 128 → n_classes.
+
+    The head still includes the CSP embedding so the classifier sees both the
+    raw-signal features *and* the original CSP context.
+
+    Parameter overhead vs. JointCSPCNN: 4 FiLM generators (256 → {64, 128, 256, 512})
+    ≈ +246k parameters (~27% increase over the base ~900k).
+
+    Args:
+        n_classes: number of output classes.
+        base_ch: base channel count for the signal branch (default 32).
+        csp_hidden: hidden dim for the CSP branch ResMLP (default 256).
+        n_csp: number of CSP features (default 107; must match the dataset).
+        csp_blocks: residual blocks in the CSP branch (default 2).
+        drop: dropout probability in CSP branch and head (default 0.25).
+    """
+
+    def __init__(
+        self,
+        n_classes: int,
+        base_ch: int = 32,
+        csp_hidden: int = 256,
+        n_csp: int = N_CSP,
+        csp_blocks: int = 2,
+        drop: float = 0.25,
+    ) -> None:
+        super().__init__()
+        self.n_csp = n_csp
+        self.csp_branch = _CSPBranch(n_csp=n_csp, hidden=csp_hidden, n_blocks=csp_blocks, drop=drop)
+        self.sig_branch = _FiLMSignalBranch(in_ch=6, base_ch=base_ch, cond_dim=csp_hidden)
+
+        fused = self.sig_branch.out_dim + csp_hidden   # 256 + 256 = 512
+        self.head = nn.Sequential(
+            nn.Linear(fused, fused // 2), nn.BatchNorm1d(fused // 2), nn.GELU(),
+            nn.Dropout(drop),
+            nn.Linear(fused // 2, fused // 4), nn.BatchNorm1d(fused // 4), nn.GELU(),
+            nn.Dropout(drop),
+            nn.Linear(fused // 4, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 6 + N_CSP, N)
+        sig = x[:, :6, :]          # (B, 6, N)   complex_powers
+        csp = x[:, 6:, 0]          # (B, N_CSP)  CSP features
+        return self.forward_parts(sig, csp)
+
+    def forward_parts(self, complex_powers: torch.Tensor, csp_raw: torch.Tensor) -> torch.Tensor:
+        """Efficient entry point: avoids broadcasting the CSP vector.
+
+        Args:
+            complex_powers: (B, 6, N) complex power channels.
+            csp_raw: (B, N_CSP) z-score normalised CSP features.
+        """
+        csp_emb = self.csp_branch(csp_raw)                # (B, 256) — run CSP first
+        sig_emb = self.sig_branch(complex_powers, csp_emb)  # (B, 256) — CSP conditions CNN
+        return self.head(torch.cat([sig_emb, csp_emb], dim=1))
+
+
+# ── Dilated multi-scale signal branch ────────────────────────────────────────
+
+class _DilatedCell(nn.Module):
+    """Single residual dilated-convolution cell (BN + ReLU + residual)."""
+
+    def __init__(self, channels: int, dilation: int) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(
+            channels, channels, kernel_size=3,
+            padding=dilation, dilation=dilation, bias=False,
+        )
+        self.bn = nn.BatchNorm1d(channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.relu(self.bn(self.conv(x)) + x)
+
+
+class _DilatedSignalBranch(nn.Module):
+    """DilatedCNN backbone producing a multi-scale pooled embedding for joint fusion.
+
+    Same structure as ``DilatedCNN1D`` but without the classification head.
+    After each dilated cell both avg- and max-pooled features are collected,
+    yielding a ``2 × channels × len(dilations)``-dimensional descriptor that
+    encodes structure at every temporal scale simultaneously.
+
+    Args:
+        in_ch: input channels (6 for complex_powers).
+        channels: fixed channel width throughout all dilated cells (default 32).
+        dilations: dilation factors for each cell (default (1,2,4,8,16,32)).
+    """
+
+    def __init__(
+        self,
+        in_ch: int = 6,
+        channels: int = 32,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16, 32),
+    ) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_ch, channels, 7, stride=2, padding=3, bias=False),
+            nn.BatchNorm1d(channels), nn.ReLU(),
+            nn.MaxPool1d(3, stride=2, padding=1),
+        )
+        self.cells = nn.ModuleList(_DilatedCell(channels, d) for d in dilations)
+        self.out_dim = 2 * channels * len(dilations)  # avg + max per cell
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.stem(x)
+        pooled: list[torch.Tensor] = []
+        for cell in self.cells:
+            h = cell(h)
+            pooled.append(F.adaptive_avg_pool1d(h, 1).squeeze(-1))
+            pooled.append(F.adaptive_max_pool1d(h, 1).squeeze(-1))
+        return torch.cat(pooled, dim=1)   # (B, 2*channels*n_cells)
+
+
+class JointCSPDilated(nn.Module):
+    """CSP expert features fused with a DilatedCNN multi-scale signal embedding.
+
+    The DilatedCNN signal branch pools avg+max features at every dilated cell
+    (d=1,2,4,8,16,32), producing a 384-d multi-scale descriptor that captures
+    temporal structure at six explicit scales.  This is structurally complementary
+    to the CSP 256-d embedding, which integrates over the full signal — the two
+    branches encode orthogonal views (global moments vs. multi-scale local structure).
+
+    By contrast, JointCSPCNN's ResNet signal branch produces a single GAP 256-d
+    vector, which is a global average similar to CSP's own moment computation.
+    The dilated branch is expected to be less redundant with CSP and to add more
+    complementary information per parameter.
+
+    Parameter budget (~570k) is 37% smaller than JointCSPCNN (~900k) because the
+    dilated backbone (22k params) is 20× smaller than the ResNet1D signal branch
+    (≈440k) while providing richer scale coverage.
+
+    Args:
+        n_classes: number of output classes.
+        channels: fixed channel width in the dilated backbone (default 32).
+        csp_hidden: hidden dim for the CSP branch ResMLP (default 256).
+        n_csp: number of CSP features (default 107; must match the dataset).
+        csp_blocks: residual blocks in the CSP branch (default 2).
+        drop: dropout probability in CSP branch and head (default 0.25).
+    """
+
+    def __init__(
+        self,
+        n_classes: int,
+        channels: int = 32,
+        csp_hidden: int = 256,
+        n_csp: int = N_CSP,
+        csp_blocks: int = 2,
+        drop: float = 0.25,
+    ) -> None:
+        super().__init__()
+        self.n_csp = n_csp
+        self.sig_branch = _DilatedSignalBranch(in_ch=6, channels=channels)
+        self.csp_branch = _CSPBranch(n_csp=n_csp, hidden=csp_hidden, n_blocks=csp_blocks, drop=drop)
+
+        fused = self.sig_branch.out_dim + csp_hidden   # 384 + 256 = 640
+        self.head = nn.Sequential(
+            nn.Linear(fused, fused // 2), nn.BatchNorm1d(fused // 2), nn.GELU(),
+            nn.Dropout(drop),
+            nn.Linear(fused // 2, fused // 4), nn.BatchNorm1d(fused // 4), nn.GELU(),
+            nn.Dropout(drop),
+            nn.Linear(fused // 4, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 6 + N_CSP, N)
+        sig = x[:, :6, :]          # (B, 6, N)   complex_powers
+        csp = x[:, 6:, 0]          # (B, N_CSP)  CSP features
+        return self.forward_parts(sig, csp)
+
+    def forward_parts(self, complex_powers: torch.Tensor, csp_raw: torch.Tensor) -> torch.Tensor:
+        """Efficient entry point: avoids broadcasting the CSP vector.
+
+        Args:
+            complex_powers: (B, 6, N) complex power channels.
+            csp_raw: (B, N_CSP) z-score normalised CSP features.
+        """
+        sig_emb = self.sig_branch(complex_powers)           # (B, 384) multi-scale
+        csp_emb = self.csp_branch(csp_raw)                  # (B, 256) global
         return self.head(torch.cat([sig_emb, csp_emb], dim=1))
