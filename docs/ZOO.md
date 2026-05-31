@@ -1,11 +1,39 @@
 # Model Zoo
 
 **Task:** Automatic Modulation Recognition — 8 classes (2PSK, 4PSK, 8PSK, π/4-DQPSK, 16QAM, 64QAM, 256QAM, MSK)
-**Input:** 2048 complex samples · SNR 20–40 dB · OSR uniform 1–20 samples/symbol
 
 ---
 
-## Results at a Glance
+## Results at a Glance — baseline_32768_200k (primary benchmark)
+
+*200k signals × 32,768 I/Q samples, AWGN, SNR ∈ [0,30] dB, 70/15/15 split, seed=42.*
+*See `docs/full-comparison-200k.md` for full analysis with per-class breakdowns.*
+
+```
+  Category      Model                Format          Params    Test acc  Notes
+  ───────────────────────────────────────────────────────────────────────────────────
+  Pure Expert   iq_features_mlp      iq_features       5,384   64.29%   10 generic stats
+                csp_canonical_mlp    csp_canonical     5,576   68.79%   13 cumulants (Swami)
+                csp_expert_mlp       csp_features     11,592   80.12%   107 features ← ceiling
+  ───────────────────────────────────────────────────────────────────────────────────
+  Pure DL       resnet_1d            complex_powers   966,664   TBD     running (pure_dl exp)
+                dilated_cnn_1d       complex_powers   120,840   TBD     queued
+                multiscale_pyramid   complex_powers    91,400   TBD     queued
+                patch_transformer    complex_powers   950,408   TBD     queued
+  ───────────────────────────────────────────────────────────────────────────────────
+  Hybrid        joint_csp_cnn ★      joint_csp        899,848  87.12%  best single (s42); mean 86.94%
+                joint_csp_attn       joint_csp        932,872  85.62%  attn mean; −1.32pp vs GAP; 3.3× noisier
+                joint_csp_dual       joint_csp        901,192  71.92%  mixed; OOD: Rician=72.9% SoftLim=56.8% (hypothesis REJECTED)
+                joint_csp_film       joint_csp      1,146,568   TBD    FiLM conditioning queued (chain3)
+  ───────────────────────────────────────────────────────────────────────────────────
+```
+
+Theoretical ceiling: ~85–87% (64/256-QAM unseparable without symbol timing).
+Feature ladder: 64.29% → 68.79% → 80.12% → 87.12% single / 87.99% 2-seed ens / 88.25% 6-model ens (IQ stats → CSP canonical → CSP expert → Joint).
+OOD channels: Rician near-free (−1.30pp OOD gap); SoftLimiter catastrophic (−18.25pp); linear channels generalize, nonlinear do not.
+Pure DL running (~50h est total); FiLM queued. See docs/full-comparison-200k.md for full analysis.
+
+## Legacy Results — baseline_4096 (2048-sample, earlier experiments)
 
 | model               | best format          | test acc | notes                                  |
 |---------------------|----------------------|----------|----------------------------------------|
@@ -384,3 +412,170 @@ unique to each modulation class.
 
 - **File:** `models/resnet.py` · `ResNet2D` (reused)
 - **Formats:** `scf` (forced — 1-channel 2D input)
+
+---
+
+## Expert Feature Models
+
+These models operate on **pre-computed handcrafted features** rather than raw I/Q.
+The features are computed by the dataset loader in `data.py` and cached where possible.
+All use `FeatureMLP` as the classifier: `Linear(n_feat → 256) + BN + ReLU + Dropout(0.25)`
++ residual blocks + `Linear(256 → C)`.
+
+---
+
+### `iq_features_mlp`
+
+Shallow MLP over 10 generic IQ statistics. **Not grounded in modulation theory** — serves
+as a lower bound to show what generic signal statistics can achieve.
+
+Features: `mean|x|`, `std|x|`, `mean|x|²`, `mean|x|⁴`, `std(Re)`, `std(Im)`,
+`mean|Δφ|`, `std(Δφ)`, spectral centroid, spectral spread.
+
+Weakness: amplitude moments are AWGN-sensitive (scale with noise power, not signal power),
+and spectral features are uninformative for phase-modulated signals.
+
+- **File:** `models/mlp.py` · `FeatureMLP(n_classes, 10)`
+- **Formats:** `iq_features`
+- **Params:** ~20 K
+
+---
+
+### `csp_canonical_mlp`
+
+MLP over the 13-feature canonical CSP vector from **Swami & Sadler (2000)**, normalized
+by signal power for AWGN immunity. Includes higher-order cumulants (C₂₀, C₄₀, C₄₂, C₄₁),
+amplitude envelope moments (M₄₂, M₆₃, M₈₄, σ_A), differential phase autocorrelations
+(|E[d²]|, |E[d⁴]|, |E[d⁸]|), IF variability, and the conjugate spectral peak.
+
+These are analytically optimal under the AWGN + ideal baseband assumption. With
+SRRC pulse-shaping and CFO, ISI and spectral spreading degrade their power.
+
+- **File:** `models/mlp.py` · `FeatureMLP(n_classes, 13)`
+- **Formats:** `csp_canonical`
+- **Params:** ~15 K
+
+---
+
+### `csp_expert_mlp`
+
+MLP over the **107-feature expert CSP vector** developed through iterative feature
+engineering on this dataset. The key discovery: the full **29-point SIGNED profile**
+of Re(E[d⁴ₜ]) (4th-power differential phase autocorrelation vs. lag T) uniquely
+separates 4PSK / 8PSK / π/4-DQPSK via its shape:
+
+```
+  4PSK:       sustained plateau ~+0.12 across T=2..30
+  8PSK:       rapid decay from +0.16 to ≈0 by T=8
+  π/4-DQPSK: unique negative dip at T≈12 (reaches −0.08)
+```
+
+Feature groups: cumulants, amplitude moments, d⁴ profile (29 signed lags), phase
+autocorrelations at k=2,4,8, FFT of d⁴ profile (periodicity structure).
+
+**This is the CSP-only ceiling: 81.43% at K=32768 on baseline_32768_200k.**
+
+- **File:** `models/mlp.py` · `FeatureMLP(n_classes, 107)`, features in `features.py`
+- **Formats:** `csp_features`
+- **Params:** 11,592 (FeatureMLP: 107→64→64→8; capacity saturates at 64 hidden units —
+  architecture is not the bottleneck, feature quality is)
+
+---
+
+## Hybrid Expert + DL Models
+
+These models fuse **pre-computed 107-dim CSP expert features** with a learned convolutional
+encoder on the raw I/Q signal. Input format is `joint_csp`: a `(B, 113, N)` tensor with
+the first 6 channels being `complex_powers` and the remaining 107 channels being the CSP
+vector broadcast across N time steps. The signal branch reads channels 0–5; the CSP branch
+reads `x[:, 6:, 0]`.
+
+**Why complex_powers for the signal branch?**
+`complex_powers` = [Re(z), Im(z), Re(z²), Im(z²), Re(z⁴), Im(z⁴)]. Powers z², z⁴ are
+the moments that drive the standard CSP cumulant features — this gives the convolutional
+branch a soft inductive bias toward cyclostationary structure without hard-coding it.
+
+**Training recommendation:** LR=2e-3 (OneCycleLR, pct_start=0.15), 80 epochs.
+LR=2e-3 finds wider basins than 1e-3: +2.81pp mean accuracy and 8× lower seed variance.
+
+**⚠ Scalability note:** `modreczoo-train` computes CSP features on-the-fly per sample in
+the DataLoader. For small datasets (≤40k signals) this is acceptable. For large datasets
+(200k+ signals, K=32768), pre-compute and cache features first (see the standalone training
+scripts in `/tmp/train_joint_200k.py` for the caching pattern: `load_or_compute_csp()`).
+On-the-fly computation at 200k × 32768 samples ≈ 2–3h per epoch for CSP features alone.
+
+---
+
+### `joint_csp_cnn`
+
+Two-branch hybrid. Signal branch: `ResNet1D(in_ch=6, base_ch=32)` → GlobalAvgPool → 128d.
+CSP branch: `ResMLP(107→256→256)` → 128d. Head: `Linear(256→C)`.
+
+Best config (V2b, 2 seeds): mean test 86.94%, seed spread 0.36pp. **Current best single model.**
+
+- **File:** `models/joint.py` · `JointCSPCNN`
+- **Formats:** `joint_csp` (forced — 113-channel joint input)
+- **Params:** 899,848
+
+---
+
+### `joint_csp_attn`
+
+`joint_csp_cnn` with **additive attention pooling** replacing GlobalAvgPool in the signal
+branch. A learned query vector attends over the temporal dimension of the ResNet1D output,
+weighting positions by their relevance before collapsing to a 128d embedding.
+
+Hypothesis: attention can focus on symbol transitions and guard intervals rather than
+averaging uniformly over the entire signal, where long stretches of steady-state carry
+no discriminative information.
+
+- **File:** `models/joint.py` · `JointCSPAttn`
+- **Formats:** `joint_csp` (forced)
+- **Params:** 932,872
+
+---
+
+### `joint_csp_dual`
+
+`joint_csp_cnn` with a **12-channel signal branch** combining:
+- `complex_powers` (6ch): [Re(z), Im(z), Re(z²), Im(z²), Re(z⁴), Im(z⁴)] — amplitude-aware
+- `unit_phasor_powers` (6ch): [Re(u²), Im(u²), Re(u⁴), Im(u⁴), Re(u⁸), Im(u⁸)] where u=z/|z|
+
+The unit phasor branch removes amplitude information entirely, making it **fading-robust**:
+amplitude variations from Rayleigh/Rician fading are normalized out before feature learning.
+Computed on-the-fly via iterative De Moivre squaring (no extra memory).
+
+Designed for the channels OOD experiment: train on {awgn, rayleigh}, test on {rician,
+soft_limiter}.
+
+- **File:** `models/joint.py` · `JointCSPDual`
+- **Formats:** `joint_csp` (forced)
+- **Params:** 901,192
+
+---
+
+### `joint_csp_film`
+
+`joint_csp_cnn` with **Feature-wise Linear Modulation (FiLM)** conditioning at every ResNet stage.
+
+Unlike the concatenation-only approach, the CSP branch runs *first* and generates per-channel
+scale/shift parameters `(γ, β)` applied to each residual block's feature maps. The signal
+CNN becomes a conditional feature extractor — knowing (from the CSP verdict) whether the
+signal is likely PSK or QAM, it can amplify the relevant filter banks.
+
+**Delta-form FiLM:** `(1 + γ) · h + β` with zero-initialized γ, β.  
+At init, the block behaves exactly like a plain ResBlock. Training adds conditioning progressively,
+avoiding the instability of random γ initialization.
+
+**Efficient training path:** `.forward_parts(complex_powers, csp_raw)` accepts pre-split tensors
+directly, avoiding broadcasting 107 CSP features across 32768 time steps (18× memory saving
+vs. the broadcast joint tensor). The standard `.forward(joint_tensor)` path is unchanged for
+the hotpath CLI.
+
+**Parameter overhead:** 4 FiLM generators (256→{64, 128, 256, 512}) add ~246k params (+27%
+over JointCSPCNN). These are entirely in the conditioning projections — no extra conv filters.
+
+- **File:** `models/joint.py` · `JointCSPFiLM`
+- **Formats:** `joint_csp` (forced)
+- **Params:** 1,146,568
+- **Status:** Queued after chain2 (channels OOD + pure DL) — `/tmp/train_film_200k.py`

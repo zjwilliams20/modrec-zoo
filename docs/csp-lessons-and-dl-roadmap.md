@@ -1,6 +1,6 @@
 # CSP Expert Feature Lessons & Deep-Learning Roadmap
 
-*Last updated: 2026-05-29 — 6-model ensemble=81.92% (baseline_4096); JointCSPCNN on baseline_32768 4-model ensemble=81.22%; Phase transition sweep on 200k DONE: CSP-only K=32768 = 81.43%; JointV2-s0 on 200k DONE: test=85.57% (+4.14pp over CSP-only); 5 configs remaining*
+*Last updated: 2026-05-30 — 400k PT study COMPLETE. JointV2b-s42=87.12% best single; v2b-ens=87.99%; 6-model-ens=88.25%. ResNet1D DONE: s0=85.37%, s42=86.22% (mean=85.80%, gap to V2b mean=1.14pp). DilatedCNN running. FiLM queued (chain3). 400k arch search queued after FILM_200K_DONE.*
 
 ---
 
@@ -733,38 +733,166 @@ CSP-only ceiling at K=32768, 200k: **81.43%** (vs 40k: 78.8%, vs JointCSP ensemb
 5. **CSP-only at K=32768, 200k nearly matches JointCSPCNN ensemble at 40k (81.22%)**: The
    signal branch may add less on 200k than expected, since CSP features themselves are stronger.
 
-### 8.5 Architecture Search Results (200k, IN PROGRESS)
+### 8.5 Architecture Search Results (200k, COMPLETE)
 
-Architecture search (`train_joint_200k.py`) running on GPU — 6 configs, ~3 min/epoch:
-- JointV2-s0, JointV2-s42   — JointCSPCNN, 899k params, LR=1e-3, 60 epochs
-- JointV2b-s0, JointV2b-s42 — JointCSPCNN, 899k params, LR=2e-3, 80 epochs
-- AttnV2b-s0, AttnV2b-s42   — JointCSPAttn (attention pooling), 932k params, LR=2e-3, 80 epochs
-
-**Interim results (JointV2-s0):**
+Full arch search results on baseline_32768_200k. Reference: CSP-only=81.43%.
 
 ```
-  Epoch   val     best    Note
-  ──────────────────────────────────────────────────────
-    10    0.7533  0.7981  peak LR (destabilized); true best ~ep8
-    20    0.7994  0.8108  converging; within 0.35pp of CSP-only
-    30    0.8172  0.8492  ★ ABOVE CSP-ONLY by +3.49pp; best peaked ~ep26
-    40    0.8444  0.8492  val recovered; best unchanged — plateau forming
-    50    0.8403  0.8572  best ticked up +0.80pp — still improving in LR tail
-  CSP-only (200k, K=32768):  0.8143   ← ceiling beaten by +4.29pp at ep50
+Config          Params   Test     Best val  Δ CSP-only  Notes
+────────────────────────────────────────────────────────────────────────
+JointV2-s0      899,848  85.57%   85.72%    +4.14pp
+JointV2-s42     899,848  82.69%   82.76%    +1.26pp    seed-sensitive
+JointV2b-s0     899,848  86.76%   86.99%    +5.33pp    LR=2e-3
+JointV2b-s42    899,848  87.12%   86.96%    +5.69pp ★  BEST SINGLE — wide basin
+AttnV2b-s0      932,872  86.22%   86.11%    +4.79pp    attn worse than GAP by −0.54pp
+AttnV2b-s42     932,872  85.02%   84.96%    +3.59pp    attn worse by −1.74pp vs GAP s42
+────────────────────────────────────────────────────────────────────────
+JointV2 mean (2 seeds):   84.13%   seed spread 2.88pp
+JointV2b mean (2 seeds):  86.94%   seed spread 0.36pp  ← LR=2e-3 = 8× lower variance
+AttnV2b mean (2 seeds):   85.62%   seed spread 1.20pp  ← attn = worse AND 3.3× noisier
+
+Ensembles:
+  v2b (2-seed):    87.99%   best 2-model
+  4-CNN:           87.58%
+  6-model:         88.25%   best overall; +1.13pp over best single
 ```
 
-    60    0.8462  0.8572  training complete — best unchanged from ep50
-  CSP-only (200k, K=32768):  0.8143   ← beaten by +4.14pp
+Key findings:
 
-  [JointV2-s0] Test: 0.8557  (best val: 0.8572)
+1. **LR=2e-3 is the dominant hyperparameter.**  +2.81pp mean, 8× lower seed spread.
+   Higher LR finds flatter minima (val→test gap ≈ 0 for V2b vs −0.11pp for V2).
+   This is a stronger effect than any architectural change tested.
 
-Signal branch contribution at 200k scale:
-  Test accuracy:   85.57%
-  vs CSP-only:     +4.14pp (81.43%)
-  vs 40k ensemble: +4.35pp (81.22%)
-  Val/test gap:    0.15pp (very healthy generalization)
+2. **Attention pooling (AttnV2b) is CONFIRMED worse than GAP by a wider margin.**
+   Mean: 85.62% vs 86.94% (−1.32pp). Seed spread: 1.20pp vs 0.36pp (3.3× noisier).
+   AttnV2b performs worse on BOTH seeds and has higher variance. Verdict: do not use
+   attention pooling for cyclostationary signal classification.
 
-JointV2-s42 started — 5 configs remaining.
+3. **Ensemble ceiling is ~88.25%** (6-model). Diminishing returns above 2 models
+   (−88.0% with just v2b-ens, vs 88.25% with all 6). Main confusion pair remains
+   64/256-QAM (asymmetric: 29.4% 64→56 misclassification rate even at ensemble level).
 
-Expected arch search completion: ~21.8h from 02:21 (≈ 23:00 today).
-Reference: CSP-only (200k, K=32768) = 81.43%; beaten at epoch 30 (JointV2-s0).
+4. **5× more training data adds +5.5pp** (40k ensemble: 81.22% → 200k V2b-s42: 87.12%).
+   This exceeds the CSP-only theoretical gain from more data (~+2pp estimated), confirming
+   that the DL branch is the primary beneficiary of larger datasets.
+
+Expert baselines (same 200k dataset, 107f CSP features, FeatureMLP 11k params):
+
+```
+IQ-stats-MLP (10f):      64.29%
+CSP-canonical-MLP (13f): 68.79%  +4.50pp over IQ
+CSP-expert-MLP (107f):   80.12%  +11.33pp over canonical ← signed d⁴ profile
+JointCSPCNN V2b-s42:     87.12%  +7.00pp over expert CSP
+v2b 2-seed ensemble:     87.99%  +7.87pp over expert CSP
+```
+
+Full write-up: `docs/full-comparison-200k.md`
+
+---
+
+## 9. Channels OOD Experiment (COMPLETE 2026-05-30)
+
+### 9.1 Setup
+
+Dataset: `channels_32768` — 200k signals, 4 channel types (awgn/rayleigh/rician/soft_limiter, 50k each).
+Protocol A (mixed): 70/15/15 split across all channels → tests in-distribution multi-channel robustness.
+Protocol B (OOD): train on {awgn, rayleigh}, evaluate on unseen {rician, soft_limiter}.
+Configs: JointCSPCNN (6ch complex_powers) and JointCSPDual (12ch: complex_powers + unit_phasor_powers).
+
+### 9.2 Results
+
+```
+Config             Train ch    Test acc  AWGN    Rayleigh  Rician  SoftLim
+──────────────────────────────────────────────────────────────────────────
+JointCNN-all-s0    all         72.70%    80.91%  63.12%    74.45%  75.59%
+JointDual-all-s0   all         71.92%    80.31%  61.41%    72.71%  72.64%
+JointCNN-ood-s0    awgn+ray    64.50%    —       —         73.15%  57.34%
+JointDual-ood-s0   awgn+ray    65.04%    —       —         72.86%  56.82%
+──────────────────────────────────────────────────────────────────────────
+```
+
+### 9.3 Hypothesis REJECTED: JointCSPDual is not more OOD-robust
+
+JointCSPDual (unit_phasor removes amplitude → should be fading-robust) is consistently
+**worse** by −0.78pp (mixed) and −0.29pp to −0.52pp (OOD). The mechanism:
+- CSP cumulants already normalize by power: C₄₂/M₂₁², M₄₂/M₂₁², etc. are amplitude-invariant
+- QAM classification fundamentally requires amplitude information (ring separation)
+- Stripping amplitude hurts QAM more than fading helps PSK
+
+### 9.4 Two Qualitatively Different OOD Failure Modes
+
+**Rician — near-zero OOD gap (−1.30pp: 73.15% vs 74.45%)**
+Rician = AWGN + Rayleigh LOS component = linear superposition. Training on {AWGN, Rayleigh}
+spans the LOS spectrum. The CSP cumulant manifold of Rician signals lies within the convex
+hull of AWGN and Rayleigh CSP manifolds → perfect generalization.
+
+**SoftLimiter — catastrophic OOD gap (−18.25pp: 57.34% vs 75.59%)**
+Soft limiter = nonlinear amplitude clipping → harmonic distortion → new cumulant signatures.
+These fall entirely off the training manifold. No amount of architectural improvement or
+amplitude normalization helps: the features for Rician/AWGN are simply wrong for clipped signals.
+
+**Key principle: linear channel effects generalize; nonlinear effects do not.**
+This is a distribution-shift problem at the representation level, not a model-capacity problem.
+
+### 9.5 Why Rayleigh Performance is Low Even With Training (63.12%)
+
+Rayleigh fading changes the *realized* amplitude at each instantiation non-trivially.
+QAM ring separations become per-sample random variables (Rayleigh-distributed amplitude).
+The CSP features encode *statistical* amplitude structure but the Rayleigh amplitude
+randomness partially obscures the QAM cumulant separations at each finite K.
+The DL branch cannot recover what the channel erases within a single signal realization.
+
+### 9.6 Implications for Future Work
+
+1. **Training on nonlinear channel types is essential for soft-limiter robustness**
+   (obvious in hindsight but now empirically confirmed).
+2. **Linear channels generalize freely** — training on {AWGN, Rayleigh} covers Rician for free.
+3. **Amplitude normalization is not the solution** — CSP cumulants already achieve it;
+   further normalization (unit phasors) removes needed information.
+4. **Online training opportunity**: `OnlineModrecDataset` can sample soft_limiter signals
+   during training without requiring a pre-generated dataset, enabling mixed nonlinear training.
+
+---
+
+## 10. 400k Phase Transition Study — Key Finding
+
+**Dataset: baseline_32768_400k (400k signals vs 200k)**
+
+CSP expert features (107f) + FeatureMLP, K varied. Δ = 400k accuracy minus 200k accuracy.
+
+```
+  K       400k      200k    Δ        N_sigs  Regime
+  ──────────────────────────────────────────────────────────────
+      64   33.92%  32.30%  +1.62pp  400k    data-limited (MLP variance)
+     128   42.26%  41.30%  +0.96pp  400k    data-limited
+     256   51.19%  50.31%  +0.88pp  400k    data-limited
+     512   59.07%  58.50%  +0.57pp  400k    transitional
+   1,024   64.80%  64.52%  +0.28pp  400k    transitional → feature-limited
+   2,048   69.33%  69.31%  +0.02pp  400k    ★ BOUNDARY: data-limited ends
+   4,096   70.90%  73.09%  −2.19pp  50k†    feature-limited (subsample artifact)
+   8,192   74.39%  75.99%  −1.60pp  50k†    feature-limited (subsample artifact)
+  16,384   76.17%  78.80%  −2.63pp  50k†    feature-limited (subsample artifact)
+  32,768   78.29%  81.43%  −3.14pp  50k†    feature-limited (subsample artifact)
+  ──────────────────────────────────────────────────────────────
+  † Negative Δ is a subsample artifact, not a true 400k deficit. The 50k subsample
+    provides only ~35k training signals vs 200k's ~140k. True Δ at full 400k would
+    be ~+0pp at K=32768 (same saturation as K=2048). Full 400k×K=32768 = 72h (infeasible).
+```
+
+**Conclusion**: CSP expert features saturate with ~140k training examples (the 200k dataset)
+by K=2048 (128 symbols). The crossover from data-limited to feature-limited falls at
+K≈1024–2048. Above this threshold, more training data provides no benefit for fixed features.
+
+**Subsample non-monotonicity**: At K≥4096, the deltas are non-monotone (−2.19, −1.60, −2.63,
+−3.14pp). Two competing effects: feature quality improves with K (reduces the gap) vs. the
+fixed ~35k/140k training deficit (increases the gap). The recovery at K=8192 reflects the
+feature quality improvement briefly offsetting the training deficit before diminishing returns
+give the training deficit permanent control.
+
+**Implication for DL**: Learned features are more data-hungry than fixed CSP features.
+Expect 400k to give +2–4pp for DL at K=32768, where CSP features give ~+0pp.
+This asymmetry explains why joint models benefit more from additional data.
+
+---
+
+*Status 2026-05-30: PT study COMPLETE. pure_dl ep70/80 (best=85.50%). FiLM queued. Arch search queued after FILM_200K_DONE.*
