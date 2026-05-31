@@ -88,14 +88,19 @@ def auxiliary_target_info(encoders: tuple[MetadataTargetEncoder, ...]) -> list[d
     return [encoder.to_dict() for encoder in encoders]
 
 
-def unpack_batch(batch: tuple[Any, ...]) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor] | None]:
+def unpack_batch(
+    batch: tuple[Any, ...],
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor] | None, dict[str, torch.Tensor] | None]:
     if len(batch) == 2:
         xb, yb = batch
-        return xb, yb, None
+        return xb, yb, None, None
     if len(batch) == 3:
         xb, yb, auxiliary = batch
-        return xb, yb, auxiliary
-    raise ValueError(f"Expected DataLoader batch with 2 or 3 fields, got {len(batch)}.")
+        return xb, yb, auxiliary, None
+    if len(batch) == 4:
+        xb, yb, auxiliary, raw_meta = batch
+        return xb, yb, auxiliary, raw_meta
+    raise ValueError(f"Expected DataLoader batch with 2, 3, or 4 fields, got {len(batch)}.")
 
 
 def _build_encoder(column: str, values: np.ndarray, n_bins: int) -> MetadataTargetEncoder:

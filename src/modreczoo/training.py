@@ -112,6 +112,28 @@ def log_auxiliary_accuracy_metrics(prefix: str, metrics: Dict, step: int | None 
         mlflow.log_metric(f"{prefix}_{safe_metric_name(name)}_accuracy", values["accuracy"], step=step)
 
 
+def snr_focal_cross_entropy(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    snr_db: torch.Tensor,
+    snr_min: float,
+    snr_max: float,
+    gamma: float,
+) -> torch.Tensor:
+    """Cross-entropy with per-sample weights that down-weight high-SNR (easy) samples.
+
+    weight = exp(-gamma * t), where t = (snr - snr_min) / (snr_max - snr_min) clamped to [0, 1].
+    Weights are normalized to preserve the mean loss scale.
+    gamma=0 reduces to standard cross-entropy; gamma=1 gives ~2.7x ratio between
+    min- and max-SNR weights; gamma=2 gives ~7.4x.
+    """
+    per_sample = F.cross_entropy(logits, labels, reduction="none")
+    t = ((snr_db - snr_min) / max(snr_max - snr_min, 1e-8)).clamp(0.0, 1.0)
+    weights = torch.exp(-gamma * t)
+    weights = weights / weights.mean()
+    return (per_sample * weights).mean()
+
+
 def multitask_loss(
     model: torch.nn.Module,
     outputs: dict[str, torch.Tensor],
@@ -119,8 +141,16 @@ def multitask_loss(
     auxiliary: dict[str, torch.Tensor] | None,
     aux_loss_weight: float,
     aux_loss_mode: str,
+    snr_db: torch.Tensor | None = None,
+    focal_gamma: float = 0.0,
+    snr_min: float = 0.0,
+    snr_max: float = 20.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    losses = {"modulation": F.cross_entropy(outputs["modulation"], labels)}
+    if snr_db is not None and focal_gamma > 0.0:
+        mod_loss = snr_focal_cross_entropy(outputs["modulation"], labels, snr_db, snr_min, snr_max, focal_gamma)
+    else:
+        mod_loss = F.cross_entropy(outputs["modulation"], labels)
+    losses = {"modulation": mod_loss}
     if auxiliary:
         for name, target in auxiliary.items():
             if name in outputs:
@@ -547,6 +577,11 @@ def train_one_model(
     mlflow.log_param("model_name", model_name)
     mlflow.log_param("representation", representation)
 
+    focal_gamma: float = getattr(args, "focal_gamma", 0.0)
+    passthrough = ("snr_db",) if focal_gamma > 0.0 else ()
+    snr_min = float(train_metadata["snr_db"].min()) if focal_gamma > 0.0 else 0.0
+    snr_max = float(train_metadata["snr_db"].max()) if focal_gamma > 0.0 else 20.0
+
     loader_kwargs = dict(
         model_name=model_name,
         channel_format=channel_format,
@@ -560,9 +595,12 @@ def train_one_model(
         spectrogram_noverlap=args.spectrogram_noverlap,
         spectrogram_window=args.spectrogram_window,
         auxiliary_encoders=auxiliary_encoders,
+        passthrough_columns=passthrough,
     )
     train_loader = get_data_loader(train_signals, train_metadata, train_idx, label_to_id, shuffle=True, **loader_kwargs)
     val_loader = get_data_loader(val_signals, val_metadata, val_idx, label_to_id, shuffle=False, **loader_kwargs)
+
+    val_true = np.array([label_to_id[str(val_metadata["modulation"][int(i)])] for i in val_idx])
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best_state = None
@@ -581,12 +619,17 @@ def train_one_model(
             leave=False,
         )
         loss_totals: dict[str, float] = {}
+        gw_sum = 0.0
+        gw_max = 0.0
+        gw_batches = 0
         for batch in train_bar:
-            xb, yb, auxiliary = unpack_batch(batch)
+            xb, yb, auxiliary, raw_meta = unpack_batch(batch)
             sync_if_cuda(device)
             xb, yb = xb.to(device), yb.to(device)
             if auxiliary is not None:
                 auxiliary = {name: target.to(device) for name, target in auxiliary.items()}
+            if raw_meta is not None:
+                raw_meta = {k: v.to(device) for k, v in raw_meta.items()}
             sync_if_cuda(device)
 
             optimizer.zero_grad(set_to_none=True)
@@ -598,8 +641,21 @@ def train_one_model(
                 auxiliary,
                 args.aux_loss_weight,
                 args.aux_loss_mode,
+                snr_db=raw_meta["snr_db"] if raw_meta is not None else None,
+                focal_gamma=focal_gamma,
+                snr_min=snr_min,
+                snr_max=snr_max,
             )
             loss.backward()
+            batch_ratios = [
+                (p.grad.norm() / p.data.norm()).item()
+                for p in model.parameters()
+                if p.grad is not None and p.data.norm() > 1e-8
+            ]
+            if batch_ratios:
+                gw_sum += sum(batch_ratios) / len(batch_ratios)
+                gw_max = max(gw_max, max(batch_ratios))
+                gw_batches += 1
             optimizer.step()
             sync_if_cuda(device)
 
@@ -617,6 +673,7 @@ def train_one_model(
             desc="val",
             auxiliary_tasks=auxiliary_tasks or None,
         )
+        snr_acc = accuracy_by_snr(val_metadata, val_idx, val_true, val_metrics["y_pred"], SNR_BIN_WIDTH)
         train_loss = total_loss / max(len(train_loader.dataset), 1)
         epoch_duration = time.perf_counter() - epoch_start
         train_samples_per_sec = len(train_loader.dataset) / max(train_duration, np.finfo(float).eps)
@@ -625,6 +682,12 @@ def train_one_model(
             mlflow.log_metric(f"train_{safe_metric_name(name)}_loss", loss_total / max(len(train_loader.dataset), 1), step=epoch)
         mlflow.log_metric("val_accuracy", val_metrics["accuracy"], step=epoch)
         log_auxiliary_accuracy_metrics("val", val_metrics, step=epoch)
+        for row in snr_acc.iter_rows(named=True):
+            key = f"val_acc_snr_{int(row['snr_bin_db'])}dB"
+            mlflow.log_metric(key, row["accuracy"], step=epoch)
+        if gw_batches > 0:
+            mlflow.log_metric("grad_weight_ratio_mean", gw_sum / gw_batches, step=epoch)
+            mlflow.log_metric("grad_weight_ratio_max", gw_max, step=epoch)
         mlflow.log_metric("epoch_duration_sec", epoch_duration, step=epoch)
         mlflow.log_metric("train_samples_per_sec", train_samples_per_sec, step=epoch)
         epoch_bar.set_postfix(

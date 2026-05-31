@@ -86,6 +86,7 @@ class ModrecDataset(Dataset):
         spectrogram_window: str = "hann",
         n_samples: int | None = None,
         auxiliary_encoders: tuple[MetadataTargetEncoder, ...] = (),
+        passthrough_columns: tuple[str, ...] = (),
     ) -> None:
         self.signals = signals
         self.indices = indices.astype(np.int64)
@@ -105,6 +106,10 @@ class ModrecDataset(Dataset):
             encoder.column: encoder.encode(metadata)
             for encoder in auxiliary_encoders
         }
+        self._passthrough = {
+            col: metadata[col].to_numpy().astype(np.float32)
+            for col in passthrough_columns
+        }
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -115,13 +120,15 @@ class ModrecDataset(Dataset):
         y = self.label_to_id[str(self.labels[idx])]
         features = torch.from_numpy(self._features(x)).float()
         label = torch.tensor(y, dtype=torch.long)
-        if not self.auxiliary_targets:
-            return features, label
-        auxiliary = {
-            name: torch.tensor(targets[idx], dtype=torch.long)
-            for name, targets in self.auxiliary_targets.items()
-        }
-        return features, label, auxiliary
+        auxiliary = (
+            {name: torch.tensor(targets[idx], dtype=torch.long) for name, targets in self.auxiliary_targets.items()}
+            if self.auxiliary_targets
+            else None
+        )
+        if not self._passthrough:
+            return (features, label) if auxiliary is None else (features, label, auxiliary)
+        raw_meta = {col: torch.tensor(arr[idx]) for col, arr in self._passthrough.items()}
+        return features, label, auxiliary if auxiliary is not None else {}, raw_meta
 
     def _prepare_signal(self, x: np.ndarray) -> np.ndarray:
         x = normalize_signal(x)
@@ -184,6 +191,7 @@ def get_data_loader(
     persistent_workers: bool = True,
     n_samples: int | None = None,
     auxiliary_encoders: tuple[MetadataTargetEncoder, ...] = (),
+    passthrough_columns: tuple[str, ...] = (),
     **loader_kwargs,
 ) -> DataLoader:
     dataset = ModrecDataset(
@@ -202,6 +210,7 @@ def get_data_loader(
         spectrogram_window=spectrogram_window,
         n_samples=n_samples,
         auxiliary_encoders=auxiliary_encoders,
+        passthrough_columns=passthrough_columns,
     )
     if num_workers > 0:
         loader_kwargs.setdefault("persistent_workers", persistent_workers)

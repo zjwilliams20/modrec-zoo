@@ -31,7 +31,7 @@ def evaluate(
     auxiliary_total = {name: 0 for name in (auxiliary_tasks or {})}
     with torch.no_grad():
         for batch in tqdm(loader, desc=desc, unit="batch", leave=False):
-            xb, yb, auxiliary = unpack_batch(batch)
+            xb, yb, auxiliary, _raw_meta = unpack_batch(batch)
             xb_device = xb.to(device)
             yb_device = yb.to(device)
             outputs = forward_all(model, xb_device) if auxiliary_tasks else {"modulation": model(xb_device)}

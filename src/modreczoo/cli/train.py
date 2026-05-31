@@ -96,6 +96,13 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--aux-loss-weight", type=float, default=0.2)
     parser.add_argument("--aux-loss-mode", choices=("fixed", "uncertainty"), default="fixed")
     parser.add_argument("--aux-head-hidden", type=int, default=0)
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=0.0,
+        help="SNR-driven focal loss exponent. 0 = standard cross-entropy. "
+             "Higher values down-weight high-SNR (easy) samples more aggressively.",
+    )
     parser.add_argument("--sweep-channel-formats", nargs="+", default=list(CHANNEL_FORMATS))
     parser.add_argument("--sweep-cfo-estimators", nargs="+", default=["lag_correlation"])
     parser.add_argument("--sweep-batch-sizes", nargs="+", type=int, default=None)

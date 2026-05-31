@@ -460,7 +460,7 @@ def plot_input_examples(
     n_classes = len(id_to_label)
     examples: dict = {}
     for batch in loader:
-        xb, yb, _ = unpack_batch(batch)
+        xb, yb, *_ = unpack_batch(batch)
         for x, y in zip(xb, yb):
             cls = int(y.item())
             if cls not in examples:
